@@ -15,5 +15,5 @@
   "requirements": [
     "aioproxmox@git+https://github.com/mZ738/aioproxmox.git@39a689bd0a56fcc56c90570dbfb164ae0b95d7df"
   ],
-  "version": "5.0.0"
+  "version": "6.0.0-beta.5-djc.1"
 }
