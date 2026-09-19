@@ -1,0 +1,734 @@
+"""Helper endpoints for compatibility."""
+
+import logging
+from typing import Any, cast
+
+from .exceptions import ProxmoxAPIError, ProxmoxError, ResourceNotFoundError
+from .helpers import pve_cluster_cache, pve_find_node_in_cache
+from .model import PVEPermissions
+from .model.disks import DiskSmart, NodeDisk, ZfsPool
+from .model.guest import GuestFilesystem, GuestInterface, Snapshot
+from .model.health import (
+    CephStatus,
+    Certificate,
+    GuestWithoutBackup,
+    HAStatus,
+    ReplicationJob,
+    Subscription,
+)
+from .model.pve import (
+    ClusterResourcesCollection,
+    ContainerResource,
+    LXCStatus,
+    NodeAptUpdate,
+    NodeAptUpdateProperty,
+    NodeStatus,
+    NodeStorageResource,
+    NodeStorageResources,
+    NodeTask,
+    NodeTasks,
+    NodeVersion,
+    QemuResource,
+    QemuStatus,
+)
+from .model.summary import NodeInterface
+
+_LOGGER = logging.getLogger(__name__)
+
+
+class PostAction:
+    """A generic executor that fires a POST request to its configured path when called."""
+
+    def __init__(self, client: Any, path: str) -> None:
+        """Initialize POST action."""
+        self.client = client
+        self.path = path
+
+    def __call__(self, **kwargs: Any) -> Any:
+        """Execute action."""
+        return self.client.request("POST", self.path, json_data=kwargs)
+
+
+class NodeActionProperty:
+    """Descriptor to dynamically bind a node action endpoint to a PostAction route."""
+
+    def __init__(self, endpoint: str) -> None:
+        """Initialize property."""
+        self.endpoint = endpoint
+
+    def __get__(self, instance: Any, owner: Any = None) -> PostAction:
+        """Call action."""
+        if instance is None:
+            return self  # type: ignore[return-value]
+        return PostAction(instance.client, f"nodes/{instance.node}/{self.endpoint}")
+
+
+class QemuActionProperty:
+    """Descriptor to dynamically bind a QEMU action endpoint to a PostAction route."""
+
+    def __init__(self, endpoint: str) -> None:
+        """Initialize property."""
+        self.endpoint = endpoint
+
+    def __get__(self, instance: Any, owner: Any = None) -> PostAction:
+        """Call action."""
+        if instance is None:
+            return self  # type: ignore[return-value]
+        return PostAction(
+            instance.client,
+            f"nodes/{instance.node}/qemu/{instance.vmid}/status/{self.endpoint}",
+        )
+
+
+class LXCActionProperty:
+    """Descriptor to dynamically bind an LXC action endpoint to a PostAction route."""
+
+    def __init__(self, endpoint: str) -> None:
+        """Initialize property."""
+        self.endpoint = endpoint
+
+    def __get__(self, instance: Any, owner: Any = None) -> PostAction:
+        """Call action."""
+        if instance is None:
+            return self  # type: ignore[return-value]
+        return PostAction(
+            instance.client,
+            f"nodes/{instance.node}/lxc/{instance.vmid}/status/{self.endpoint}",
+        )
+
+
+class NodeStatusCommand:
+    """Descriptor for the node commands that go through `nodes/{node}/status`.
+
+    A node is rebooted or shut down with `POST nodes/{node}/status` and a
+    `command` parameter (PVE::API2::Nodes); there is no `nodes/{node}/reboot`.
+    """
+
+    def __init__(self, command: str) -> None:
+        """Initialize property."""
+        self.command = command
+
+    def __get__(self, instance: Any, owner: Any = None) -> Any:
+        """Call command."""
+        if instance is None:
+            return self
+
+        async def run() -> Any:
+            return await instance.client.request(
+                "POST",
+                f"nodes/{instance.node}/status",
+                json_data={"command": self.command},
+            )
+
+        return run
+
+
+def node_action(endpoint: str) -> NodeActionProperty:
+    """Factory helper to declare a Node PostAction endpoint."""
+    return NodeActionProperty(endpoint)
+
+
+def qemu_action(endpoint: str) -> QemuActionProperty:
+    """Factory helper to declare a QEMU PostAction endpoint."""
+    return QemuActionProperty(endpoint)
+
+
+def lxc_action(endpoint: str) -> LXCActionProperty:
+    """Factory helper to declare an LXC PostAction endpoint."""
+    return LXCActionProperty(endpoint)
+
+
+def _agent_result(raw: Any) -> list[dict[str, Any]]:
+    """Unwrap the `result` envelope the guest agent commands answer with."""
+    entries = raw.get("result") if isinstance(raw, dict) else raw
+    return entries if isinstance(entries, list) else []
+
+
+class QemuAgentEndpoint:
+    """Agent endpoint."""
+
+    def __init__(
+        self,
+        client: Any,
+        node: str,
+        vmid: int,
+    ) -> None:
+        """Endpoint initialisation."""
+        self.client = client
+        self.node = node
+        self.vmid = vmid
+
+    async def status(self) -> None:
+        """Return generic agent info."""
+        raise NotImplementedError
+
+    async def ping(self) -> bool:
+        """Ping agent for reply on alive."""
+        try:
+            await self.client.request(
+                "POST", f"nodes/{self.node}/qemu/{self.vmid}/agent/ping"
+            )
+        except ProxmoxAPIError:
+            return False
+        return True
+
+    async def fsinfo(self) -> list[GuestFilesystem]:
+        """Fetch the guest's filesystems with their usage, from inside the guest.
+
+        The host only knows the size of the virtual disks; this is where a
+        VM's disk usage comes from. Needs `VM.GuestAgent.Audit` (Proxmox VE 9)
+        and a running agent - otherwise the API answers 500.
+        """
+        raw = await self.client.request(
+            "GET", f"nodes/{self.node}/qemu/{self.vmid}/agent/get-fsinfo"
+        )
+        return GuestFilesystem.list_from_api(_agent_result(raw))
+
+    async def network_interfaces(self) -> list[GuestInterface]:
+        """Fetch the guest's interfaces with their addresses, from inside the guest."""
+        raw = await self.client.request(
+            "GET", f"nodes/{self.node}/qemu/{self.vmid}/agent/network-get-interfaces"
+        )
+        return GuestInterface.list_from_api(_agent_result(raw))
+
+
+class QemuStatusEndpoint:
+    """Qemu nested status endpoint."""
+
+    def __init__(
+        self,
+        client: Any,
+        node: str,
+        vmid: int,
+    ) -> None:
+        """Endpoint initialisation."""
+        self.client = client
+        self.node = node
+        self.vmid = vmid
+
+    async def status(self) -> None:
+        """Return generic Qemu info."""
+        raise NotImplementedError
+
+    async def current(self) -> QemuStatus:
+        """Fetch deep sensoric metrics for a QEMU VM, dynamically inferring its host node."""
+        node = pve_find_node_in_cache(self.client.cluster_resources, self.vmid)
+
+        if not node:
+            _LOGGER.debug(
+                "VMID %d not found in internal cache. Executing single fallback cluster fetch.",
+                self.vmid,
+            )
+            try:
+                await self.client.cluster.resources()
+                node = pve_find_node_in_cache(self.client.cluster_resources, self.vmid)
+            except Exception as err:
+                raise ResourceNotFoundError(
+                    f"Failed to fetch resource map while tracking VMID {self.vmid}"
+                ) from err
+
+            if not node:
+                raise ResourceNotFoundError(
+                    f"Target QEMU VMID {self.vmid} could not be located anywhere in the cluster."
+                )
+
+        raw = await self.client.request(
+            "GET", f"nodes/{node}/qemu/{self.vmid}/status/current"
+        )
+        if not isinstance(raw, dict):
+            raise ProxmoxError(
+                f"Expected dict response from qemu VM status, got {type(raw)}"
+            )
+        return QemuStatus.from_dict(raw)
+
+    async def snapshot(
+        self,
+        snap_name: str,
+        snap_description: str | None = None,
+        snap_state: bool = True,
+    ) -> str:
+        """Create a new Snapshot for a VM."""
+        payload = {
+            "snapname": snap_name,
+            "vmstate": int(snap_state),  # Note, convert bool back to int
+        }
+        if snap_description:
+            payload["description"] = snap_description
+
+        return str(
+            await self.client.request(
+                "POST",
+                f"nodes/{self.node}/qemu/{self.vmid}/snapshot",
+                data=payload,
+            )
+        )
+
+    async def hibernate(self) -> str:
+        """Suspend the VM to disk - what the web interface calls Hibernate."""
+        return str(
+            await self.client.request(
+                "POST",
+                f"nodes/{self.node}/qemu/{self.vmid}/status/suspend",
+                json_data={"todisk": 1},
+            )
+        )
+
+    async def unlock(self) -> str:
+        """Remove the config lock, like `qm unlock`.
+
+        Not part of the status API: the lock is deleted from the config.
+        QEMU refuses to edit a locked guest's config unless `skiplock` is
+        passed, which only root@pam may do.
+        """
+        return str(
+            await self.client.request(
+                "PUT",
+                f"nodes/{self.node}/qemu/{self.vmid}/config",
+                json_data={"delete": "lock", "skiplock": 1},
+            )
+        )
+
+    start = qemu_action("start")
+    stop = qemu_action("stop")
+    reboot = qemu_action("reboot")
+    # Proxmox has no `restart` command; the attribute stays for callers
+    # that used it and now reaches the command it meant.
+    restart = qemu_action("reboot")
+    suspend = qemu_action("suspend")
+    resume = qemu_action("resume")
+    reset = qemu_action("reset")
+    shutdown = qemu_action("shutdown")
+
+
+class QemuEndpoint:
+    """Endpoint for Qemu (VM)."""
+
+    def __init__(self, client: Any, node: str, vmid: int) -> None:
+        """Endpoint initialisation."""
+        self.client = client
+        self.node = node
+        self.vmid = vmid
+        self.status = QemuStatusEndpoint(client, node, vmid)
+        self.agent = QemuAgentEndpoint(client, node, vmid)
+
+    async def snapshots(self) -> list[Snapshot]:
+        """Fetch the VM's snapshot list - `current` included, see `Snapshot.is_current`."""
+        raw = await self.client.request(
+            "GET", f"nodes/{self.node}/qemu/{self.vmid}/snapshot"
+        )
+        return Snapshot.list_from_api(raw)
+
+
+class LXCStatusEndpoint:
+    """LXC nested status endpoint."""
+
+    def __init__(
+        self,
+        client: Any,
+        node: str,
+        vmid: int,
+    ) -> None:
+        """Endpoint initialisation."""
+        self.client = client
+        self.node = node
+        self.vmid = vmid
+
+    async def status(self) -> None:
+        """Return generic LXC info."""
+        raise NotImplementedError
+
+    async def current(self) -> LXCStatus:
+        """Fetch deep sensoric metrics for a container, dynamically inferring its host node."""
+        node = pve_find_node_in_cache(self.client.cluster_resources, self.vmid)
+
+        if not node:
+            _LOGGER.debug(
+                "VMID %d not found in internal cache. Executing single fallback cluster fetch.",
+                self.vmid,
+            )
+            try:
+                await self.client.cluster.resources()
+                node = pve_find_node_in_cache(self.client.cluster_resources, self.vmid)
+            except Exception as err:
+                raise ResourceNotFoundError(
+                    f"Failed to fetch resource map while tracking VMID {self.vmid}"
+                ) from err
+
+            if not node:
+                raise ResourceNotFoundError(
+                    f"Target container VMID {self.vmid} could not be located anywhere in the cluster."
+                )
+
+        raw = await self.client.request(
+            "GET", f"nodes/{node}/lxc/{self.vmid}/status/current"
+        )
+        if not isinstance(raw, dict):
+            raise ProxmoxError(
+                f"Expected dict response from LCX status, got {type(raw)}"
+            )
+        return LXCStatus.from_dict(raw)
+
+    async def snapshot(
+        self,
+        snap_name: str | None = None,
+        snap_description: str | None = None,
+        snap_state: bool = True,
+    ) -> str:
+        """Create a new Snapshot for a VM."""
+        payload = {
+            "snapname": snap_name,
+            "vmstate": int(snap_state),  # Note, convert bool back to int
+        }
+        if snap_description:
+            payload["description"] = snap_description
+
+        return str(
+            await self.client.request(
+                "POST",
+                f"nodes/{self.node}/lxc/{self.vmid}/snapshot",
+                data=payload,
+            )
+        )
+
+    async def unlock(self) -> str:
+        """Remove the config lock, like `pct unlock`; the LXC config takes no `skiplock`."""
+        return str(
+            await self.client.request(
+                "PUT",
+                f"nodes/{self.node}/lxc/{self.vmid}/config",
+                json_data={"delete": "lock"},
+            )
+        )
+
+    start = lxc_action("start")
+    reboot = lxc_action("reboot")
+    # Proxmox has no `restart` command; see QemuStatusEndpoint.
+    restart = lxc_action("reboot")
+    stop = lxc_action("stop")
+    shutdown = lxc_action("shutdown")
+    suspend = lxc_action("suspend")
+    resume = lxc_action("resume")
+
+
+class LXCEndpoint:
+    """LXC Container endpoint."""
+
+    def __init__(self, client: Any, node: str, vmid: int) -> None:
+        """Endpoint initialisation."""
+        self.client = client
+        self.node = node
+        self.vmid = vmid
+        self.status = LXCStatusEndpoint(client, node, vmid)
+
+    async def snapshots(self) -> list[Snapshot]:
+        """Fetch the container's snapshot list - `current` included."""
+        raw = await self.client.request(
+            "GET", f"nodes/{self.node}/lxc/{self.vmid}/snapshot"
+        )
+        return Snapshot.list_from_api(raw)
+
+    async def interfaces(self) -> list[GuestInterface]:
+        """Fetch the container's interfaces with their addresses; needs it running."""
+        raw = await self.client.request(
+            "GET", f"nodes/{self.node}/lxc/{self.vmid}/interfaces"
+        )
+        return GuestInterface.list_from_api(raw if isinstance(raw, list) else [])
+
+
+class AccessEndpoint:
+    """Access endpoint."""
+
+    def __init__(self, client: Any) -> None:
+        """Endpoint initialisation."""
+        self.client = client
+
+    async def permissions(self) -> PVEPermissions:
+        """Fetch the full, granular ACL permissions map for the active session."""
+        raw = await self.client.request("GET", "access/permissions")
+        self.client.permissions = PVEPermissions.from_api_response(raw)
+
+        return cast(PVEPermissions, self.client.permissions)
+
+
+class NodeAptEndpoint:
+    """APT endpoint for a node."""
+
+    def __init__(self, client: Any, node: str) -> None:
+        """APT endpoint for a node."""
+        self.client = client
+        self.node = node
+
+    async def update(self) -> NodeAptUpdate:
+        """Fetch apt update list."""
+        raw = await self.client.request("GET", f"nodes/{self.node}/apt/update")
+        items = [NodeAptUpdateProperty.from_dict(item) for item in raw or []]
+        return NodeAptUpdate(items=items)
+
+
+class NodeDisksEndpoint:
+    """Physical disks, their SMART data and ZFS pools of a node."""
+
+    def __init__(self, client: Any, node: str) -> None:
+        """Endpoint initialisation."""
+        self.client = client
+        self.node = node
+
+    async def all(self) -> list[NodeDisk]:
+        """Fetch the node's physical disks.
+
+        Proxmox runs smartctl for the health and wearout columns, which wakes
+        a sleeping disk - worth knowing before polling this every minute.
+        """
+        raw = await self.client.request("GET", f"nodes/{self.node}/disks/list")
+        return NodeDisk.list_from_api(raw)
+
+    async def smart(self, devpath: str) -> DiskSmart:
+        """Fetch one disk's SMART data; `DiskSmart.summary` reads either shape."""
+        raw = await self.client.request(
+            "GET", f"nodes/{self.node}/disks/smart", params={"disk": devpath}
+        )
+        if not isinstance(raw, dict):
+            raise ProxmoxError(
+                f"Expected dict response from disks/smart, got {type(raw)}"
+            )
+        return DiskSmart.from_dict(raw)
+
+    async def zfs(self) -> list[ZfsPool]:
+        """Fetch the node's ZFS pools."""
+        raw = await self.client.request("GET", f"nodes/{self.node}/disks/zfs")
+        return ZfsPool.list_from_api(raw)
+
+
+class NodeEndpoint:
+    """Node endpoint."""
+
+    def __init__(self, client: Any, node: str) -> None:
+        """Endpoint initialisation."""
+        self.client = client
+        self.node = node
+
+    def apt(self) -> NodeAptEndpoint:
+        """Map APT endpoint."""
+        return NodeAptEndpoint(self.client, self.node)
+
+    def disks(self) -> NodeDisksEndpoint:
+        """Map the disks endpoint."""
+        return NodeDisksEndpoint(self.client, self.node)
+
+    def qemu(self, vmid: int) -> QemuEndpoint:
+        """Map individual Qemu endpoint."""
+        return QemuEndpoint(self.client, self.node, vmid)
+
+    def lxc(self, vmid: int) -> LXCEndpoint:
+        """Map LXC endpoint."""
+        return LXCEndpoint(self.client, self.node, vmid)
+
+    async def qemu_all(self) -> list[QemuResource]:
+        """Fetch all Qemu resources."""
+        raw = await self.client.request("GET", f"nodes/{self.node}/qemu")
+        return [QemuResource.from_dict(item) for item in raw]
+
+    async def lxc_all(self) -> list[ContainerResource]:
+        """Fetch all LXC resources."""
+        raw = await self.client.request("GET", f"nodes/{self.node}/lxc")
+        return [ContainerResource.from_dict(item) for item in raw]
+
+    async def status(self) -> NodeStatus:
+        """Fetch deep operational status for this physical node."""
+        raw = await self.client.request("GET", f"nodes/{self.node}/status")
+        return NodeStatus.from_dict(raw)
+
+    async def tasks(
+        self,
+        typefilter: str | None = None,
+        limit: int | None = None,
+        source: str | None = None,
+    ) -> NodeTasks:
+        """Fetch operational history blocks matching specific filters (e.g., vzdump).
+
+        `source` is `archive` for finished tasks (the default in Proxmox),
+        `active` for tasks in progress, `all` for both. `LastBackup` and
+        `RunningBackup` read the two lists.
+        """
+        params: dict[str, Any] = {}
+        if typefilter:
+            params["typefilter"] = typefilter
+        if limit is not None:
+            params["limit"] = limit
+        if source:
+            params["source"] = source
+
+        # The Proxmox API handles query constraints cleanly via standard payload mappings
+        raw = await self.client.request(
+            "GET",
+            f"nodes/{self.node}/tasks",
+            params=params or None,
+        )
+        return NodeTasks(tasks=NodeTask.list_from_api(raw))
+
+    async def storage(self) -> NodeStorageResources:
+        """Fetch high-level allocations and health for all storages on this node."""
+        raw = await self.client.request("GET", f"nodes/{self.node}/storage")
+        return NodeStorageResources(storages=NodeStorageResource.list_from_api(raw))
+
+    async def version(self) -> NodeVersion:
+        """Fetch PVE version for this physical node."""
+        raw = await self.client.request("GET", f"nodes/{self.node}/version")
+        return NodeVersion.from_dict(raw)
+
+    async def certificates(self) -> list[Certificate]:
+        """Fetch the node's certificates; `serving_certificate()` picks the one the API uses."""
+        raw = await self.client.request("GET", f"nodes/{self.node}/certificates/info")
+        return Certificate.list_from_api(raw)
+
+    async def subscription(self) -> Subscription:
+        """Fetch the node's subscription state; needs no privilege beyond logging in."""
+        raw = await self.client.request("GET", f"nodes/{self.node}/subscription")
+        return Subscription.from_dict(raw if isinstance(raw, dict) else {})
+
+    async def replication(self) -> list[ReplicationJob]:
+        """Fetch the node's replication jobs; `ReplicationHealth.from_jobs()` sums them up."""
+        raw = await self.client.request("GET", f"nodes/{self.node}/replication")
+        return ReplicationJob.list_from_api(raw)
+
+    async def network(self) -> list[NodeInterface]:
+        """Fetch the node's interfaces; `node_mac_addresses()` reads the physical ports' MACs."""
+        raw = await self.client.request("GET", f"nodes/{self.node}/network")
+        return NodeInterface.list_from_api(raw)
+
+    async def vzdump(
+        self,
+        vmid: int | list[int] | None = None,
+        *,
+        all_guests: bool = False,
+        storage: str | None = None,
+        mode: str | None = None,
+        compress: str | None = None,
+        notes_template: str | None = None,
+        **extra: Any,
+    ) -> str:
+        """Start a backup run the way *Backup now* in the web interface does.
+
+        Name the guests (`vmid`) or take everything the node hosts
+        (`all_guests`); `storage`, `mode` (snapshot, suspend, stop) and
+        `compress` fall back to the node's defaults. A `notes_template`
+        (`{{guestname}}`, `{{vmid}}`, `{{node}}`, `{{cluster}}`) needs a
+        storage alongside it, as vzdump does. vzdump holds one lock per node:
+        a second run waits for the first. Returns the task id. Needs
+        `VM.Backup` on the guests and `Datastore.AllocateSpace` on the storage.
+        """
+        payload: dict[str, Any] = dict(extra)
+        if all_guests:
+            payload["all"] = 1
+        elif vmid is not None:
+            ids = vmid if isinstance(vmid, list) else [vmid]
+            if not ids:
+                raise ProxmoxError("vzdump: name at least one guest or take all")
+            payload["vmid"] = ",".join(str(i) for i in ids)
+        else:
+            raise ProxmoxError("vzdump: name at least one guest or take all")
+        if storage:
+            payload["storage"] = storage
+        if mode:
+            payload["mode"] = mode
+        if compress is not None:
+            payload["compress"] = compress
+        if notes_template:
+            if not storage:
+                raise ProxmoxError("vzdump: a notes template needs a storage")
+            payload["notes-template"] = notes_template
+        return str(
+            await self.client.request(
+                "POST", f"nodes/{self.node}/vzdump", json_data=payload
+            )
+        )
+
+    reboot = NodeStatusCommand("reboot")
+    shutdown = NodeStatusCommand("shutdown")
+    wakeonlan = node_action("wakeonlan")
+    suspendall = node_action("suspendall")
+    stopall = node_action("stopall")
+    startall = node_action("startall")
+
+
+class ClusterEndpoint:
+    """Cluster endpoint."""
+
+    def __init__(self, client: Any) -> None:
+        """Endpoint initialisation."""
+        self.client = client
+
+    async def status(self) -> list[dict[str, Any]]:
+        """Fetch `cluster/status`: the cluster entry and one entry per node.
+
+        Each node entry carries the address it joined the cluster on (`ip`)
+        and whether it is the node answering (`local`) - what `learn_hosts()`
+        uses to know where else the API answers.
+        """
+        raw = await self.client.request("GET", "cluster/status")
+        return (
+            [entry for entry in raw if isinstance(entry, dict)]
+            if isinstance(raw, list)
+            else []
+        )
+
+    async def ceph_status(self) -> CephStatus:
+        """Fetch Ceph's health and usage; needs Sys.Audit or Datastore.Audit on `/`."""
+        raw = await self.client.request("GET", "cluster/ceph/status")
+        return CephStatus.from_api(raw if isinstance(raw, dict) else {})
+
+    async def arm_ha(self) -> str:
+        """Resume HA fencing after a disarm; queues a CRM command, returns its task id.
+
+        Needs `Sys.Console` on `/` and pve-ha-manager 5.1.3 or newer. Whether
+        the cluster actually reached the armed state is what `ha_status()`
+        says afterwards - arm and disarm only queue the command.
+        """
+        return str(await self.client.request("POST", "cluster/ha/status/arm-ha"))
+
+    async def disarm_ha(self, resource_mode: str = "freeze") -> str:
+        """Pause HA fencing for planned maintenance; queues a CRM command.
+
+        `resource_mode` is what happens to HA services meanwhile: `freeze`
+        keeps them locked in their current state, no automatic action - the
+        safer choice; `ignore` suspends HA tracking entirely and lets guests
+        be managed by hand during the disarmed window. Needs `Sys.Console`
+        on `/`.
+        """
+        if resource_mode not in ("freeze", "ignore"):
+            raise ProxmoxError(
+                f"resource_mode must be 'freeze' or 'ignore', not {resource_mode!r}"
+            )
+        return str(
+            await self.client.request(
+                "POST",
+                "cluster/ha/status/disarm-ha",
+                json_data={"resource-mode": resource_mode},
+            )
+        )
+
+    async def ha_status(self) -> HAStatus:
+        """Fetch the HA stack's current status; needs Sys.Audit on `/`."""
+        raw = await self.client.request("GET", "cluster/ha/status/current")
+        return HAStatus.from_api(raw if isinstance(raw, list) else [])
+
+    async def not_backed_up(self) -> list[GuestWithoutBackup]:
+        """Fetch the guests no backup job covers.
+
+        Proxmox filters this to guests the credentials may see, so it reads
+        "not backed up, as far as this user can tell".
+        """
+        raw = await self.client.request("GET", "cluster/backup-info/not-backed-up")
+        return GuestWithoutBackup.list_from_api(raw)
+
+    async def resources(self) -> ClusterResourcesCollection:
+        """A direct, optimized call returning the complete cluster resources block."""
+        raw = await self.client.request("GET", "cluster/resources")
+        self.client.cluster_resources = ClusterResourcesCollection.from_dict(
+            {"resources": raw}
+        )
+
+        # Update cache for rogue entries
+        self.client.cluster_cache = pve_cluster_cache(self.client.cluster_resources)
+
+        return cast(ClusterResourcesCollection, self.client.cluster_resources)

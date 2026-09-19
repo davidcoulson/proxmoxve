@@ -8,7 +8,6 @@ import dataclasses
 import datetime
 from typing import TYPE_CHECKING, Any
 
-from aioproxmox.exceptions import ProxmoxAPIError
 from attr import Attribute, asdict
 from homeassistant.components.diagnostics import async_redact_data
 from homeassistant.const import CONF_HOST, CONF_PASSWORD, CONF_USERNAME
@@ -16,6 +15,7 @@ from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.typing import UNDEFINED
 
+from ._vendor.aioproxmox.exceptions import ProxmoxAPIError
 from .api import get_api
 from .const import (
     CONF_DISKS_ENABLE,

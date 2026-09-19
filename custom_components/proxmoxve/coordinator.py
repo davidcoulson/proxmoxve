@@ -15,7 +15,6 @@ from urllib.parse import quote
 from zoneinfo import ZoneInfo
 
 import homeassistant.util.dt as dt_util
-from aioproxmox.exceptions import ProxmoxAPIError, ProxmoxAuthError
 from homeassistant.const import CONF_HOST, CONF_USERNAME
 from homeassistant.exceptions import ConfigEntryAuthFailed
 from homeassistant.helpers import device_registry as dr
@@ -23,6 +22,7 @@ from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.typing import UNDEFINED, UndefinedType
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
+from ._vendor.aioproxmox.exceptions import ProxmoxAPIError, ProxmoxAuthError
 from .api import CONNECTION_ERRORS, auth_error_status, get_api
 from .const import (
     CONF_GUEST_FILE_PATH,
@@ -70,9 +70,10 @@ from .storage import is_shared_storage_id, storage_entries, storage_name
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
-    from aioproxmox import ProxmoxVE
     from homeassistant.config_entries import ConfigEntry
     from homeassistant.core import HomeAssistant
+
+    from ._vendor.aioproxmox import ProxmoxVE
 
 
 def _try_parse_float(raw: object) -> float | None:

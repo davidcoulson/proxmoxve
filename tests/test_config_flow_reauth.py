@@ -4,7 +4,6 @@
 
 from unittest.mock import patch
 
-from aioproxmox.exceptions import ProxmoxAuthError
 from homeassistant.config_entries import (
     SOURCE_REAUTH,
 )
@@ -17,6 +16,7 @@ from homeassistant.data_entry_flow import FlowResultType
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.proxmoxve import DOMAIN
+from custom_components.proxmoxve._vendor.aioproxmox.exceptions import ProxmoxAuthError
 
 from .const import (
     USER_INPUT_AUTH,

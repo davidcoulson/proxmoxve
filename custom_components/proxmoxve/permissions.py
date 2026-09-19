@@ -23,8 +23,9 @@ from .api import REQUEST_ERRORS, get_api
 from .const import LOGGER
 
 if TYPE_CHECKING:
-    from aioproxmox import ProxmoxVE
     from homeassistant.core import HomeAssistant
+
+    from ._vendor.aioproxmox import ProxmoxVE
 
 type Permissions = dict[str, dict[str, int]]
 

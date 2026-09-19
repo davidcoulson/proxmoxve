@@ -4,7 +4,6 @@
 
 from unittest.mock import patch
 
-from aioproxmox.exceptions import ProxmoxAuthError
 from homeassistant.config_entries import (
     SOURCE_IMPORT,
 )
@@ -18,6 +17,7 @@ from homeassistant.helpers import issue_registry as ir
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.proxmoxve import DOMAIN
+from custom_components.proxmoxve._vendor.aioproxmox.exceptions import ProxmoxAuthError
 from custom_components.proxmoxve.const import (
     CONF_NODE,
     CONF_NODES,
@@ -36,9 +36,12 @@ async def test_flow_import_ok(hass: HomeAssistant) -> None:
     """Test import flow ok."""
     conf = YAML_INPUT_OK[DOMAIN]
     with (
-        patch("aioproxmox.ProxmoxVE.request", return_value=MOCK_GET_RESPONSE),
         patch(
-            "aioproxmox.ProxmoxHTTPAuth._get_new_tokens",
+            "custom_components.proxmoxve._vendor.aioproxmox.ProxmoxVE.request",
+            return_value=MOCK_GET_RESPONSE,
+        ),
+        patch(
+            "custom_components.proxmoxve._vendor.aioproxmox.ProxmoxHTTPAuth._get_new_tokens",
             return_value=None,
         ),
     ):
@@ -67,9 +70,12 @@ async def test_flow_import_error_node_not_exist(hass: HomeAssistant) -> None:
     """Test import error in case node not exist in Proxmox."""
     conf = YAML_INPUT_NOT_EXIST[DOMAIN]
     with (
-        patch("aioproxmox.ProxmoxVE.request", return_value=MOCK_GET_RESPONSE),
         patch(
-            "aioproxmox.ProxmoxHTTPAuth._get_new_tokens",
+            "custom_components.proxmoxve._vendor.aioproxmox.ProxmoxVE.request",
+            return_value=MOCK_GET_RESPONSE,
+        ),
+        patch(
+            "custom_components.proxmoxve._vendor.aioproxmox.ProxmoxHTTPAuth._get_new_tokens",
             return_value=None,
         ),
     ):
@@ -207,9 +213,12 @@ async def test_flow_import_error_already_configured(hass: HomeAssistant) -> None
     entry.add_to_hass(hass)
 
     with (
-        patch("aioproxmox.ProxmoxVE.request", return_value=MOCK_GET_RESPONSE),
         patch(
-            "aioproxmox.ProxmoxHTTPAuth._get_new_tokens",
+            "custom_components.proxmoxve._vendor.aioproxmox.ProxmoxVE.request",
+            return_value=MOCK_GET_RESPONSE,
+        ),
+        patch(
+            "custom_components.proxmoxve._vendor.aioproxmox.ProxmoxHTTPAuth._get_new_tokens",
             return_value=None,
         ),
     ):

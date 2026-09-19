@@ -4,7 +4,6 @@
 
 from unittest.mock import patch
 
-from aioproxmox.exceptions import ProxmoxAuthError
 from homeassistant.config_entries import (
     ConfigEntryState,
 )
@@ -21,6 +20,7 @@ from homeassistant.data_entry_flow import FlowResultType
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.proxmoxve import DOMAIN
+from custom_components.proxmoxve._vendor.aioproxmox.exceptions import ProxmoxAuthError
 from custom_components.proxmoxve.const import (
     CONF_AUTO_DISCOVERY,
     CONF_DISKS_ENABLE,
@@ -133,9 +133,12 @@ async def test_options_flow_host_auth(hass: HomeAssistant) -> None:
             assert result_auth_general_error["errors"][CONF_BASE] == "general_error"
 
         with (
-            patch("aioproxmox.ProxmoxVE.request", return_value=MOCK_GET_RESPONSE),
             patch(
-                "aioproxmox.ProxmoxHTTPAuth._get_new_tokens",
+                "custom_components.proxmoxve._vendor.aioproxmox.ProxmoxVE.request",
+                return_value=MOCK_GET_RESPONSE,
+            ),
+            patch(
+                "custom_components.proxmoxve._vendor.aioproxmox.ProxmoxHTTPAuth._get_new_tokens",
                 return_value=None,
             ),
         ):
@@ -154,9 +157,12 @@ async def test_options_flow_host_auth(hass: HomeAssistant) -> None:
 async def test_options_flow_change_expose(hass: HomeAssistant) -> None:
     """Test options config flow."""
     with (
-        patch("aioproxmox.ProxmoxVE.request", return_value=MOCK_GET_RESPONSE),
         patch(
-            "aioproxmox.ProxmoxHTTPAuth._get_new_tokens",
+            "custom_components.proxmoxve._vendor.aioproxmox.ProxmoxVE.request",
+            return_value=MOCK_GET_RESPONSE,
+        ),
+        patch(
+            "custom_components.proxmoxve._vendor.aioproxmox.ProxmoxHTTPAuth._get_new_tokens",
             return_value=None,
         ),
     ):
@@ -165,9 +171,12 @@ async def test_options_flow_change_expose(hass: HomeAssistant) -> None:
     assert mock_config_entry.state is ConfigEntryState.LOADED
 
     with (
-        patch("aioproxmox.ProxmoxVE.request", return_value=MOCK_GET_RESPONSE),
         patch(
-            "aioproxmox.ProxmoxHTTPAuth._get_new_tokens",
+            "custom_components.proxmoxve._vendor.aioproxmox.ProxmoxVE.request",
+            return_value=MOCK_GET_RESPONSE,
+        ),
+        patch(
+            "custom_components.proxmoxve._vendor.aioproxmox.ProxmoxHTTPAuth._get_new_tokens",
             return_value=None,
         ),
     ):
@@ -180,9 +189,12 @@ async def test_options_flow_change_expose(hass: HomeAssistant) -> None:
         assert result["step_id"] == "menu"
 
         with (
-            patch("aioproxmox.ProxmoxVE.request", return_value=MOCK_GET_RESPONSE),
             patch(
-                "aioproxmox.ProxmoxHTTPAuth._get_new_tokens",
+                "custom_components.proxmoxve._vendor.aioproxmox.ProxmoxVE.request",
+                return_value=MOCK_GET_RESPONSE,
+            ),
+            patch(
+                "custom_components.proxmoxve._vendor.aioproxmox.ProxmoxHTTPAuth._get_new_tokens",
                 return_value=None,
             ),
         ):
@@ -221,9 +233,12 @@ async def test_options_flow_change_expose_auth_error(hass: HomeAssistant) -> Non
         },
     )
     with (
-        patch("aioproxmox.ProxmoxVE.request", return_value=MOCK_GET_RESPONSE),
         patch(
-            "aioproxmox.ProxmoxHTTPAuth._get_new_tokens",
+            "custom_components.proxmoxve._vendor.aioproxmox.ProxmoxVE.request",
+            return_value=MOCK_GET_RESPONSE,
+        ),
+        patch(
+            "custom_components.proxmoxve._vendor.aioproxmox.ProxmoxHTTPAuth._get_new_tokens",
             return_value=None,
         ),
     ):
@@ -232,9 +247,12 @@ async def test_options_flow_change_expose_auth_error(hass: HomeAssistant) -> Non
     assert mock_config_entry.state is ConfigEntryState.LOADED
 
     with (
-        patch("aioproxmox.ProxmoxVE.request", return_value=MOCK_GET_RESPONSE),
         patch(
-            "aioproxmox.ProxmoxHTTPAuth._get_new_tokens",
+            "custom_components.proxmoxve._vendor.aioproxmox.ProxmoxVE.request",
+            return_value=MOCK_GET_RESPONSE,
+        ),
+        patch(
+            "custom_components.proxmoxve._vendor.aioproxmox.ProxmoxHTTPAuth._get_new_tokens",
             return_value=None,
         ),
     ):
@@ -278,9 +296,12 @@ async def test_options_flow_change_expose_ssl_rejection(hass: HomeAssistant) -> 
         },
     )
     with (
-        patch("aioproxmox.ProxmoxVE.request", return_value=MOCK_GET_RESPONSE),
         patch(
-            "aioproxmox.ProxmoxHTTPAuth._get_new_tokens",
+            "custom_components.proxmoxve._vendor.aioproxmox.ProxmoxVE.request",
+            return_value=MOCK_GET_RESPONSE,
+        ),
+        patch(
+            "custom_components.proxmoxve._vendor.aioproxmox.ProxmoxHTTPAuth._get_new_tokens",
             return_value=None,
         ),
     ):
@@ -289,9 +310,12 @@ async def test_options_flow_change_expose_ssl_rejection(hass: HomeAssistant) -> 
     assert mock_config_entry.state is ConfigEntryState.LOADED
 
     with (
-        patch("aioproxmox.ProxmoxVE.request", return_value=MOCK_GET_RESPONSE),
         patch(
-            "aioproxmox.ProxmoxHTTPAuth._get_new_tokens",
+            "custom_components.proxmoxve._vendor.aioproxmox.ProxmoxVE.request",
+            return_value=MOCK_GET_RESPONSE,
+        ),
+        patch(
+            "custom_components.proxmoxve._vendor.aioproxmox.ProxmoxHTTPAuth._get_new_tokens",
             return_value=None,
         ),
     ):
@@ -335,9 +359,12 @@ async def test_options_flow_change_expose_cant_connect(hass: HomeAssistant) -> N
         },
     )
     with (
-        patch("aioproxmox.ProxmoxVE.request", return_value=MOCK_GET_RESPONSE),
         patch(
-            "aioproxmox.ProxmoxHTTPAuth._get_new_tokens",
+            "custom_components.proxmoxve._vendor.aioproxmox.ProxmoxVE.request",
+            return_value=MOCK_GET_RESPONSE,
+        ),
+        patch(
+            "custom_components.proxmoxve._vendor.aioproxmox.ProxmoxHTTPAuth._get_new_tokens",
             return_value=None,
         ),
     ):
@@ -346,9 +373,12 @@ async def test_options_flow_change_expose_cant_connect(hass: HomeAssistant) -> N
     assert mock_config_entry.state is ConfigEntryState.LOADED
 
     with (
-        patch("aioproxmox.ProxmoxVE.request", return_value=MOCK_GET_RESPONSE),
         patch(
-            "aioproxmox.ProxmoxHTTPAuth._get_new_tokens",
+            "custom_components.proxmoxve._vendor.aioproxmox.ProxmoxVE.request",
+            return_value=MOCK_GET_RESPONSE,
+        ),
+        patch(
+            "custom_components.proxmoxve._vendor.aioproxmox.ProxmoxHTTPAuth._get_new_tokens",
             return_value=None,
         ),
     ):
@@ -392,9 +422,12 @@ async def test_options_flow_change_expose_general_error(hass: HomeAssistant) -> 
         },
     )
     with (
-        patch("aioproxmox.ProxmoxVE.request", return_value=MOCK_GET_RESPONSE),
         patch(
-            "aioproxmox.ProxmoxHTTPAuth._get_new_tokens",
+            "custom_components.proxmoxve._vendor.aioproxmox.ProxmoxVE.request",
+            return_value=MOCK_GET_RESPONSE,
+        ),
+        patch(
+            "custom_components.proxmoxve._vendor.aioproxmox.ProxmoxHTTPAuth._get_new_tokens",
             return_value=None,
         ),
     ):
@@ -403,9 +436,12 @@ async def test_options_flow_change_expose_general_error(hass: HomeAssistant) -> 
     assert mock_config_entry.state is ConfigEntryState.LOADED
 
     with (
-        patch("aioproxmox.ProxmoxVE.request", return_value=MOCK_GET_RESPONSE),
         patch(
-            "aioproxmox.ProxmoxHTTPAuth._get_new_tokens",
+            "custom_components.proxmoxve._vendor.aioproxmox.ProxmoxVE.request",
+            return_value=MOCK_GET_RESPONSE,
+        ),
+        patch(
+            "custom_components.proxmoxve._vendor.aioproxmox.ProxmoxHTTPAuth._get_new_tokens",
             return_value=None,
         ),
     ):

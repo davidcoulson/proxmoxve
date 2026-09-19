@@ -5,7 +5,6 @@
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from aioproxmox.exceptions import ProxmoxAuthError
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryAuthFailed
 from homeassistant.helpers import issue_registry as ir
@@ -13,6 +12,7 @@ from homeassistant.helpers.update_coordinator import UpdateFailed
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.proxmoxve import DOMAIN
+from custom_components.proxmoxve._vendor.aioproxmox.exceptions import ProxmoxAuthError
 from custom_components.proxmoxve.api import ProxmoxClient
 from custom_components.proxmoxve.const import ProxmoxType
 from custom_components.proxmoxve.coordinator import poll_api
@@ -132,9 +132,12 @@ async def test_a_refused_ticket_is_renewed_and_the_read_repeated(
         verify_ssl=False,
     )
     with (
-        patch("aioproxmox.ProxmoxHTTPAuth._get_new_tokens", new=AsyncMock()) as login,
         patch(
-            "aioproxmox.ProxmoxVE._request_once",
+            "custom_components.proxmoxve._vendor.aioproxmox.ProxmoxHTTPAuth._get_new_tokens",
+            new=AsyncMock(),
+        ) as login,
+        patch(
+            "custom_components.proxmoxve._vendor.aioproxmox.ProxmoxVE._request_once",
             new=AsyncMock(
                 side_effect=[api_error(401, "Unauthorized", ""), {"status": "online"}]
             ),

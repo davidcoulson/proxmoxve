@@ -27,12 +27,13 @@ from unittest.mock import AsyncMock, patch
 
 import aiohttp
 from aiohttp.client_reqrep import ConnectionKey
-from aioproxmox.exceptions import ProxmoxAPIError
+
+from custom_components.proxmoxve._vendor.aioproxmox.exceptions import ProxmoxAPIError
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
 
-    from aioproxmox import ProxmoxVE
+    from custom_components.proxmoxve._vendor.aioproxmox import ProxmoxVE
 
 NODE = "pve"
 
@@ -603,12 +604,12 @@ class FakeProxmox:
         """Route every request here, and skip the login round-trip."""
         with (
             patch(
-                "aioproxmox.ProxmoxVE._request_once",
+                "custom_components.proxmoxve._vendor.aioproxmox.ProxmoxVE._request_once",
                 autospec=True,
                 side_effect=self.request,
             ),
             patch(
-                "aioproxmox.ProxmoxHTTPAuth._get_new_tokens",
+                "custom_components.proxmoxve._vendor.aioproxmox.ProxmoxHTTPAuth._get_new_tokens",
                 new=AsyncMock(return_value=None),
             ),
         ):

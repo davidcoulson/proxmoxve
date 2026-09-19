@@ -8,7 +8,6 @@ from typing import TYPE_CHECKING, Any
 
 import homeassistant.helpers.config_validation as cv
 import voluptuous as vol
-from aioproxmox.exceptions import ProxmoxAPIError, ProxmoxAuthError
 from homeassistant.config_entries import SOURCE_IMPORT, ConfigEntry
 from homeassistant.const import (
     CONF_HOST,
@@ -35,6 +34,7 @@ from homeassistant.helpers import (
 )
 from homeassistant.helpers.device_registry import DeviceInfo
 
+from ._vendor.aioproxmox.exceptions import ProxmoxAPIError, ProxmoxAuthError
 from .api import (
     CONNECTION_ERRORS,
     REQUEST_ERRORS,
@@ -138,10 +138,10 @@ from .storage import (
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-    from aioproxmox import ProxmoxVE
     from homeassistant.core import Event, HomeAssistant
     from homeassistant.helpers.typing import ConfigType
 
+    from ._vendor.aioproxmox import ProxmoxVE
     from .models import ProxmoxDiskData, ProxmoxStorageData
 
 PLATFORMS = [

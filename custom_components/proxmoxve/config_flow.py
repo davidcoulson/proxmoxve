@@ -8,7 +8,6 @@ from typing import TYPE_CHECKING, Any
 
 import homeassistant.helpers.config_validation as cv
 import voluptuous as vol
-from aioproxmox.exceptions import ProxmoxAuthError
 from homeassistant import config_entries
 from homeassistant.const import (
     CONF_BASE,
@@ -23,6 +22,7 @@ from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers import selector
 
+from ._vendor.aioproxmox.exceptions import ProxmoxAuthError
 from .api import (
     CONNECTION_ERRORS,
     SSL_ERRORS,

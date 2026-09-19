@@ -10,8 +10,6 @@ from typing import Any
 
 import aiohttp
 import homeassistant.util.dt as dt_util
-from aioproxmox import ProxmoxVE
-from aioproxmox.exceptions import ProxmoxAPIError, ProxmoxAuthError
 from homeassistant.const import CONF_USERNAME
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
@@ -19,6 +17,8 @@ from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.util.ssl import create_client_context
 
+from ._vendor.aioproxmox import ProxmoxVE
+from ._vendor.aioproxmox.exceptions import ProxmoxAPIError, ProxmoxAuthError
 from .const import (
     CONF_BACKUP_STORAGE,
     CONF_HA_ADMIN_USERNAME,

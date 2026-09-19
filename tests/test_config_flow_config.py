@@ -4,7 +4,6 @@
 
 from unittest.mock import patch
 
-from aioproxmox.exceptions import ProxmoxAuthError
 from homeassistant.config_entries import (
     SOURCE_USER,
 )
@@ -19,6 +18,7 @@ from homeassistant.data_entry_flow import FlowResultType
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.proxmoxve import DOMAIN
+from custom_components.proxmoxve._vendor.aioproxmox.exceptions import ProxmoxAuthError
 from custom_components.proxmoxve.const import (
     CONF_AUTO_DISCOVERY,
     CONF_DISKS_ENABLE,
@@ -50,9 +50,12 @@ async def test_flow_ok(hass: HomeAssistant) -> None:
     assert result["step_id"] == "host"
 
     with (
-        patch("aioproxmox.ProxmoxVE.request", return_value=MOCK_GET_RESPONSE),
         patch(
-            "aioproxmox.ProxmoxHTTPAuth._get_new_tokens",
+            "custom_components.proxmoxve._vendor.aioproxmox.ProxmoxVE.request",
+            return_value=MOCK_GET_RESPONSE,
+        ),
+        patch(
+            "custom_components.proxmoxve._vendor.aioproxmox.ProxmoxHTTPAuth._get_new_tokens",
             return_value=None,
         ),
     ):
@@ -89,9 +92,12 @@ async def test_flow_accepts_a_realm_outside_the_pick_list(
     )
 
     with (
-        patch("aioproxmox.ProxmoxVE.request", return_value=MOCK_GET_RESPONSE),
         patch(
-            "aioproxmox.ProxmoxHTTPAuth._get_new_tokens",
+            "custom_components.proxmoxve._vendor.aioproxmox.ProxmoxVE.request",
+            return_value=MOCK_GET_RESPONSE,
+        ),
+        patch(
+            "custom_components.proxmoxve._vendor.aioproxmox.ProxmoxHTTPAuth._get_new_tokens",
             return_value=None,
         ),
     ):
@@ -112,7 +118,10 @@ async def test_flow_accepts_a_realm_outside_the_pick_list(
 
 async def test_flow_port_small(hass: HomeAssistant) -> None:
     """Test if port number too small."""
-    with patch("aioproxmox.ProxmoxHTTPAuth._get_new_tokens", return_value=None):
+    with patch(
+        "custom_components.proxmoxve._vendor.aioproxmox.ProxmoxHTTPAuth._get_new_tokens",
+        return_value=None,
+    ):
         result = await hass.config_entries.flow.async_init(
             DOMAIN,
             context={"source": SOURCE_USER},
@@ -125,7 +134,10 @@ async def test_flow_port_small(hass: HomeAssistant) -> None:
 
 async def test_flow_port_big(hass: HomeAssistant) -> None:
     """Test if port number too big."""
-    with patch("aioproxmox.ProxmoxHTTPAuth._get_new_tokens", return_value=None):
+    with patch(
+        "custom_components.proxmoxve._vendor.aioproxmox.ProxmoxHTTPAuth._get_new_tokens",
+        return_value=None,
+    ):
         result = await hass.config_entries.flow.async_init(
             DOMAIN,
             context={"source": SOURCE_USER},
@@ -208,9 +220,12 @@ async def test_flow_already_configured(hass: HomeAssistant) -> None:
     entry.add_to_hass(hass)
 
     with (
-        patch("aioproxmox.ProxmoxVE.request", return_value=MOCK_GET_RESPONSE),
         patch(
-            "aioproxmox.ProxmoxHTTPAuth._get_new_tokens",
+            "custom_components.proxmoxve._vendor.aioproxmox.ProxmoxVE.request",
+            return_value=MOCK_GET_RESPONSE,
+        ),
+        patch(
+            "custom_components.proxmoxve._vendor.aioproxmox.ProxmoxHTTPAuth._get_new_tokens",
             return_value=None,
         ),
     ):
@@ -238,9 +253,12 @@ async def test_an_empty_selection_with_discovery_on_is_accepted(
     )
 
     with (
-        patch("aioproxmox.ProxmoxVE.request", return_value=MOCK_GET_RESPONSE),
         patch(
-            "aioproxmox.ProxmoxHTTPAuth._get_new_tokens",
+            "custom_components.proxmoxve._vendor.aioproxmox.ProxmoxVE.request",
+            return_value=MOCK_GET_RESPONSE,
+        ),
+        patch(
+            "custom_components.proxmoxve._vendor.aioproxmox.ProxmoxHTTPAuth._get_new_tokens",
             return_value=None,
         ),
     ):
@@ -272,9 +290,12 @@ async def test_an_empty_selection_without_discovery_asks_for_a_node(
     )
 
     with (
-        patch("aioproxmox.ProxmoxVE.request", return_value=MOCK_GET_RESPONSE),
         patch(
-            "aioproxmox.ProxmoxHTTPAuth._get_new_tokens",
+            "custom_components.proxmoxve._vendor.aioproxmox.ProxmoxVE.request",
+            return_value=MOCK_GET_RESPONSE,
+        ),
+        patch(
+            "custom_components.proxmoxve._vendor.aioproxmox.ProxmoxHTTPAuth._get_new_tokens",
             return_value=None,
         ),
     ):

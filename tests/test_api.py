@@ -7,13 +7,16 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from aioproxmox.exceptions import ProxmoxAPIError, ProxmoxAuthError
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import issue_registry as ir
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.proxmoxve import DOMAIN
+from custom_components.proxmoxve._vendor.aioproxmox.exceptions import (
+    ProxmoxAPIError,
+    ProxmoxAuthError,
+)
 from custom_components.proxmoxve.api import (
     SNAPSHOT_NAME_MAX_LENGTH,
     ProxmoxClient,
@@ -338,7 +341,8 @@ async def test_client_logs_in_with_the_bare_token_name(hass: HomeAssistant) -> N
     )
 
     with patch(
-        "aioproxmox.ProxmoxVE._request_once", new=AsyncMock(return_value={})
+        "custom_components.proxmoxve._vendor.aioproxmox.ProxmoxVE._request_once",
+        new=AsyncMock(return_value={}),
     ) as request:
         await client.build_client()
 
@@ -366,7 +370,7 @@ async def test_a_refused_token_is_an_authentication_error(
 
     with (
         patch(
-            "aioproxmox.ProxmoxVE._request_once",
+            "custom_components.proxmoxve._vendor.aioproxmox.ProxmoxVE._request_once",
             new=AsyncMock(side_effect=api_error(401, "Unauthorized", "")),
         ),
         pytest.raises(ProxmoxAuthError) as refused,
@@ -387,7 +391,10 @@ async def test_a_password_client_logs_in_once(hass: HomeAssistant) -> None:
         verify_ssl=False,
     )
 
-    with patch("aioproxmox.ProxmoxHTTPAuth._get_new_tokens", new=AsyncMock()) as login:
+    with patch(
+        "custom_components.proxmoxve._vendor.aioproxmox.ProxmoxHTTPAuth._get_new_tokens",
+        new=AsyncMock(),
+    ) as login:
         await client.build_client()
 
     login.assert_awaited_once()

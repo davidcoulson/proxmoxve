@@ -10,10 +10,8 @@
   "iot_class": "local_polling",
   "issue_tracker": "https://github.com/dougiteixeira/proxmoxve/issues",
   "loggers": [
-    "aioproxmox"
+    "custom_components.proxmoxve._vendor.aioproxmox"
   ],
-  "requirements": [
-    "aioproxmox@git+https://github.com/mZ738/aioproxmox.git@39a689bd0a56fcc56c90570dbfb164ae0b95d7df"
-  ],
-  "version": "6.0.0-beta.5-djc.1"
+  "requirements": [],
+  "version": "6.0.0-beta.5-djc.2"
 }

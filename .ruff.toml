@@ -6,6 +6,7 @@
 # (PEP 758) and assume PEP 649 annotations, neither of which buys anything.
 target-version = "py313"
 
+extend-exclude = ["custom_components/proxmoxve/_vendor"]  # third-party code, kept byte-identical
 [lint]
 select = ["ALL"]
 

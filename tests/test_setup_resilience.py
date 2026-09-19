@@ -4,12 +4,13 @@
 
 from unittest.mock import AsyncMock, patch
 
-from aioproxmox.exceptions import ProxmoxAuthError
 from homeassistant.config_entries import ConfigEntryState
 from homeassistant.const import EVENT_HOMEASSISTANT_STOP
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 from pytest_homeassistant_custom_component.common import MockConfigEntry
+
+from custom_components.proxmoxve._vendor.aioproxmox.exceptions import ProxmoxAuthError
 
 from .fake_api import FakeProxmox, connection_refused, ssl_rejection
 
@@ -25,7 +26,7 @@ async def test_unreachable_host_asks_to_be_retried(
     someone reloads it by hand, even after Proxmox comes back.
     """
     with patch(
-        "aioproxmox.ProxmoxHTTPAuth._get_new_tokens",
+        "custom_components.proxmoxve._vendor.aioproxmox.ProxmoxHTTPAuth._get_new_tokens",
         new=AsyncMock(side_effect=connection_refused()),
     ):
         await hass.config_entries.async_setup(current_entry.entry_id)
@@ -39,7 +40,7 @@ async def test_a_rejected_certificate_asks_to_be_retried(
 ) -> None:
     """Test a certificate the session does not accept is a retry with a hint, not a crash."""
     with patch(
-        "aioproxmox.ProxmoxHTTPAuth._get_new_tokens",
+        "custom_components.proxmoxve._vendor.aioproxmox.ProxmoxHTTPAuth._get_new_tokens",
         new=AsyncMock(side_effect=ssl_rejection()),
     ):
         await hass.config_entries.async_setup(current_entry.entry_id)
@@ -90,7 +91,7 @@ async def test_a_host_not_issuing_tickets_yet_is_retried(
     about the credentials; everything else is "not yet".
     """
     with patch(
-        "aioproxmox.ProxmoxHTTPAuth._get_new_tokens",
+        "custom_components.proxmoxve._vendor.aioproxmox.ProxmoxHTTPAuth._get_new_tokens",
         new=AsyncMock(
             side_effect=ProxmoxAuthError(
                 "Couldn't authenticate user x@pve to https://h/access/ticket: Code 595"
@@ -108,7 +109,7 @@ async def test_a_refused_password_asks_for_credentials(
 ) -> None:
     """Test a 401 at setup is still what reauthentication is for."""
     with patch(
-        "aioproxmox.ProxmoxHTTPAuth._get_new_tokens",
+        "custom_components.proxmoxve._vendor.aioproxmox.ProxmoxHTTPAuth._get_new_tokens",
         new=AsyncMock(
             side_effect=ProxmoxAuthError(
                 "Couldn't authenticate user x@pve to https://h/access/ticket: Code 401"
