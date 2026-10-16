@@ -379,6 +379,12 @@ class ProxmoxVE:
                         await probe.auth.relogin()
                         await probe._request_once("GET", "version")
                 except (ProxmoxError, aiohttp.ClientError, TimeoutError) as err:
+                    # A reachable candidate refusing fresh credentials needs
+                    # credential repair, not another reachability probe.
+                    if isinstance(err, ProxmoxAuthError) or (
+                        isinstance(err, ProxmoxAPIError) and err.status == 401
+                    ):
+                        raise
                     _LOGGER.debug("Fallback host %s did not answer: %s", probe.host, err)
                     continue
                 self.auth = probe.auth

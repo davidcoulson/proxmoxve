@@ -12,6 +12,7 @@ from pytest_homeassistant_custom_component.common import MockConfigEntry
 from yarl import URL
 
 from custom_components.proxmoxve._vendor.aioproxmox import ProxmoxVE
+from custom_components.proxmoxve._vendor.aioproxmox.exceptions import ProxmoxAPIError
 from custom_components.proxmoxve.api import ProxmoxClient
 from custom_components.proxmoxve.const import COORDINATORS, PROXMOX_CLIENT, ProxmoxType
 
@@ -284,3 +285,28 @@ async def test_optional_client_shares_discovered_hosts(
     for client in (primary, admin):
         await client.get_api_client().request("GET", "version")
         assert client.host == LEARNED[0]
+
+
+async def test_reachable_candidate_auth_refusal_is_reported() -> None:
+    """An invalid token on a live candidate must reach credential handling."""
+    api = ProxmoxVE(
+        MagicMock(),
+        CONFIGURED,
+        user="ha",
+        token_name="ha",  # noqa: S106
+        token_value="fake",  # noqa: S106
+    )
+    api.learn_hosts([LEARNED[0]])
+
+    async def request(client: ProxmoxVE, method: str, path: str, *args: object) -> None:
+        if client.host == CONFIGURED:
+            raise connection_refused()
+        raise api_error(401, "Unauthorized", "revoked")
+
+    with (
+        patch.object(ProxmoxVE, "_request_once", autospec=True, side_effect=request),
+        pytest.raises(ProxmoxAPIError) as error,
+    ):
+        await api.request("GET", "nodes")
+    assert error.value.status == 401
+    assert api.host == CONFIGURED
