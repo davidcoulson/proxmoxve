@@ -19,8 +19,12 @@ from pytest_homeassistant_custom_component.common import MockConfigEntry
 from custom_components.proxmoxve import DOMAIN
 from custom_components.proxmoxve._vendor.aioproxmox.exceptions import ProxmoxAuthError
 from custom_components.proxmoxve.const import (
+    CONF_CONTAINERS,
+    CONF_LXC,
     CONF_NODE,
     CONF_NODES,
+    CONF_QEMU,
+    CONF_VMS,
 )
 
 from .const import (
@@ -239,3 +243,32 @@ async def test_flow_import_error_already_configured(hass: HomeAssistant) -> None
             )
             is not None
         )
+
+
+async def test_import_accumulates_guests_from_every_node(hass: HomeAssistant) -> None:
+    """Every selected guest survives a multi-node import, once and as a string."""
+    conf = {
+        **YAML_INPUT_OK[DOMAIN],
+        CONF_NODES: [
+            {CONF_NODE: "node-a", CONF_VMS: [101, "101"], CONF_CONTAINERS: [100]},
+            {CONF_NODE: "node-b", CONF_VMS: [102], CONF_CONTAINERS: [103]},
+        ],
+    }
+    with (
+        patch("custom_components.proxmoxve.config_flow.ProxmoxClient.build_client"),
+        patch("custom_components.proxmoxve.config_flow.ProxmoxClient.get_api_client"),
+        patch(
+            "custom_components.proxmoxve.config_flow.get_api",
+            return_value=[{CONF_NODE: "node-a"}, {CONF_NODE: "node-b"}],
+        ),
+        patch("custom_components.proxmoxve.async_setup_entry", return_value=True),
+    ):
+        result = await hass.config_entries.flow.async_init(
+            DOMAIN,
+            context={"source": SOURCE_IMPORT},
+            data=conf,
+        )
+    assert result["type"] == FlowResultType.CREATE_ENTRY
+    assert result["data"][CONF_NODES] == ["node-a", "node-b"]
+    assert result["data"][CONF_QEMU] == ["101", "102"]
+    assert result["data"][CONF_LXC] == ["100", "103"]

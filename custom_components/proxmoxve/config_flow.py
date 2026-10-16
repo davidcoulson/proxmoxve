@@ -901,12 +901,19 @@ class ProxmoxVEConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             # setup reads it the same way for both.
             config.setdefault(CONF_TOKEN_NAME, "")
             config[CONF_NODES] = []
+            config[CONF_QEMU] = []
+            config[CONF_LXC] = []
             for node_data in import_nodes:
                 node = node_data[CONF_NODE]
                 if node in proxmox_nodes_host:
                     config[CONF_NODES].append(node)
-                    config[CONF_QEMU] = node_data[CONF_VMS]
-                    config[CONF_LXC] = node_data[CONF_CONTAINERS]
+                    for key, source in (
+                        (CONF_QEMU, CONF_VMS),
+                        (CONF_LXC, CONF_CONTAINERS),
+                    ):
+                        for vmid in node_data[source]:
+                            if (guest_id := str(vmid)) not in config[key]:
+                                config[key].append(guest_id)
                 else:
                     ir.async_create_issue(
                         self.hass,
