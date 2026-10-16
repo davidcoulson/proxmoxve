@@ -2,13 +2,15 @@
 # SPDX-License-Identifier: MIT
 """Tests for moving to another node of the cluster when the configured one is gone."""
 
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from homeassistant.config_entries import ConfigEntryState
 from homeassistant.core import HomeAssistant
 from pytest_homeassistant_custom_component.common import MockConfigEntry
+from yarl import URL
 
+from custom_components.proxmoxve._vendor.aioproxmox import ProxmoxVE
 from custom_components.proxmoxve.api import ProxmoxClient
 from custom_components.proxmoxve.const import COORDINATORS, PROXMOX_CLIENT, ProxmoxType
 
@@ -152,3 +154,41 @@ async def test_ambiguous_command_failure_is_not_replayed(
         await proxmox.request(method, "nodes/pve/vzdump")
     request.assert_awaited_once()
     failover.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    ("host", "port", "expected_host", "expected_port"),
+    [
+        ("192.0.2.1", None, "192.0.2.1", 8006),
+        ("node.invalid:8443", None, "node.invalid", 8443),
+        ("node.invalid:8443", 9000, "node.invalid", 9000),
+        ("2001:db8::10", None, "2001:db8::10", 8006),
+        ("[2001:db8::10]", None, "2001:db8::10", 8006),
+        ("[2001:db8::10]:8443", None, "2001:db8::10", 8443),
+    ],
+)
+def test_host_and_port_parsing(
+    host: str, port: int | None, expected_host: str, expected_port: int
+) -> None:
+    """Configured and learned endpoints preserve IPv6 and explicit ports."""
+    api = ProxmoxVE(
+        MagicMock(),
+        host,
+        port=port,
+        user="ha",
+        token_name="ha",  # noqa: S106
+        token_value="fake",  # noqa: S106
+    )
+    assert URL(api.base_url).host == expected_host
+    assert URL(api.base_url).port == expected_port
+    api.learn_hosts(
+        ["2001:db8::11", "[2001:db8::11]", "[2001:db8::12]:9443", "bad.invalid/path"]
+    )
+    assert api.hosts[1:] == ("2001:db8::11", "[2001:db8::12]:9443")
+    api._use_host(1)  # noqa: SLF001
+    assert URL(api.base_url).host == "2001:db8::11"
+    assert URL(api.base_url).port == expected_port
+    api._use_host(2)  # noqa: SLF001
+    assert URL(api.base_url).host == "2001:db8::12"
+    assert URL(api.base_url).port == 9443
+    assert api.auth.base_url == api.base_url
