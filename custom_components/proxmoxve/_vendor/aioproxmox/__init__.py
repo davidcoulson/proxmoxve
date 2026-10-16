@@ -363,7 +363,13 @@ class ProxmoxVE:
                 probe.auth = copy(self.auth)
                 probe._use_host(index)
                 try:
-                    await probe._request_once("GET", "version")
+                    try:
+                        await probe._request_once("GET", "version")
+                    except ProxmoxAPIError as err:
+                        if err.status != 401 or not hasattr(probe.auth, "relogin"):
+                            raise
+                        await probe.auth.relogin()
+                        await probe._request_once("GET", "version")
                 except (ProxmoxError, aiohttp.ClientError, TimeoutError) as err:
                     _LOGGER.debug("Fallback host %s did not answer: %s", probe.host, err)
                     continue

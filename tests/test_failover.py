@@ -15,7 +15,7 @@ from custom_components.proxmoxve._vendor.aioproxmox import ProxmoxVE
 from custom_components.proxmoxve.api import ProxmoxClient
 from custom_components.proxmoxve.const import COORDINATORS, PROXMOX_CLIENT, ProxmoxType
 
-from .fake_api import NODE, FakeProxmox, connection_refused
+from .fake_api import NODE, FakeProxmox, api_error, connection_refused
 
 CONFIGURED = "192.168.10.101"
 LEARNED = ("192.0.2.10", "192.0.2.11")
@@ -199,7 +199,7 @@ async def test_simultaneous_failures_reuse_validated_host() -> None:
     """Both requests failed on A must recover on B without publishing a probe."""
     api = ProxmoxVE(
         MagicMock(), CONFIGURED, user="ha", token_name="ha", token_value="fake"
-    )  # noqa: S106
+    )
     api.learn_hosts([LEARNED[0]])
     barrier = asyncio.Barrier(2)
 
@@ -218,3 +218,34 @@ async def test_simultaneous_failures_reuse_validated_host() -> None:
         )
     assert results == [{"ok": True}, {"ok": True}]
     assert api.host == LEARNED[0]
+
+
+async def test_expired_ticket_authenticates_on_candidate() -> None:
+    """A dead ticket-renewal host must not prevent login on a live candidate."""
+    api = ProxmoxVE(MagicMock(), CONFIGURED, user="ha", password="fake")  # noqa: S106
+    api.learn_hosts([LEARNED[0]])
+    api.auth.pve_auth_ticket = "expired"
+
+    async def refresh(auth, method: str) -> None:
+        if URL(auth.base_url).host == CONFIGURED:
+            raise connection_refused()
+
+    async def login(auth) -> None:
+        assert URL(auth.base_url).host == LEARNED[0]
+        assert api.host == CONFIGURED
+        assert api.auth.pve_auth_ticket == "expired"
+        auth.pve_auth_ticket = "fresh"
+
+    async def request(client: ProxmoxVE, method: str, path: str, *args: object) -> dict:
+        if client.auth.pve_auth_ticket == "expired":
+            raise api_error(401, "Unauthorized", "expired")
+        return {"ok": True}
+
+    with (
+        patch.object(type(api.auth), "check_and_refresh", refresh),
+        patch.object(type(api.auth), "relogin", login),
+        patch.object(ProxmoxVE, "_request_once", autospec=True, side_effect=request),
+    ):
+        assert await api.request("GET", "nodes") == {"ok": True}
+    assert api.host == LEARNED[0]
+    assert api.auth.pve_auth_ticket == "fresh"
