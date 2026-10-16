@@ -2951,6 +2951,21 @@ async def poll_api(  # noqa: PLR0917
     fails the update; a 403 goes on the entry's repair and yields None.
     """
 
+    def auth_failed(error: Exception) -> None:
+        if getattr(proxmox, "is_ha_admin", False) is True:
+            ir.async_create_issue(
+                hass,
+                DOMAIN,
+                f"{config_entry.entry_id}_cluster_auth",
+                is_fixable=False,
+                is_persistent=False,
+                severity=ir.IssueSeverity.ERROR,
+                translation_key="cluster_auth",
+                translation_placeholders={"entry_id": config_entry.entry_id},
+            )
+            raise UpdateFailed("Optional cluster credentials were refused") from error
+        raise ConfigEntryAuthFailed from error
+
     def permission_to_resource(
         api_category: ProxmoxType,
         resource_id: int | str | None = None,
@@ -2986,13 +3001,13 @@ async def poll_api(  # noqa: PLR0917
         # unless the API only said it is not issuing tickets yet.
         if auth_error_status(error) not in (None, 401):
             raise UpdateFailed(error) from error
-        raise ConfigEntryAuthFailed from error
+        auth_failed(error)
     except CONNECTION_ERRORS as error:
         raise UpdateFailed(error) from error
     except ProxmoxAPIError as error:
         if error.status == 401:
             # A token has no login to repeat; this refusal is final.
-            raise ConfigEntryAuthFailed from error
+            auth_failed(error)
         if error.status == 403 and issue_crete_permissions:
             # The update coordinator passes "Update <node>" as its resource
             # id; the cluster-wide reads pass none at all. Neither may end
@@ -3023,6 +3038,8 @@ async def poll_api(  # noqa: PLR0917
             )
             return None
         raise UpdateFailed from error
+    if getattr(proxmox, "is_ha_admin", False) is True:
+        ir.async_delete_issue(hass, DOMAIN, f"{config_entry.entry_id}_cluster_auth")
     note_resource(
         hass, config_entry, FORBIDDEN, f"{api_category}_{resource_id}", listed=False
     )

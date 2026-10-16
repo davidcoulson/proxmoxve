@@ -82,6 +82,10 @@
       }
     },
     "issues": {
+      "cluster_auth": {
+        "title": "Optional cluster credentials were refused",
+        "description": "Update the optional credentials in [Configure > Cluster HA credentials](/config/integrations/integration/proxmoxve) for this entry (`{entry_id}`). Primary telemetry can continue with its own credentials."
+      },
       "import_success": {
         "title": "{host}:{port} was imported from YAML configuration",
         "description": "The YAML configuration of {host}:{port} instance of {integration} (`{platform}`) has been imported into the UI automatically.\n\nCan be safely removed from your `configuration.yaml` file."

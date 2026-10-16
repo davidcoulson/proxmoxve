@@ -1104,6 +1104,7 @@ async def async_setup_entry(hass: HomeAssistant, config_entry: ConfigEntry) -> b
                 "sensors and the cluster HA status sensors will not be created"
             )
         else:
+            candidate_client.get_api_client().is_ha_admin = True
             candidate_client.learn_hosts(proxmox_client.hosts)
             candidate_client.get_api_client().share_hosts(proxmox)
             proxmox_ha_admin_client = candidate_client

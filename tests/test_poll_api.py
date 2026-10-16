@@ -243,3 +243,25 @@ async def test_forbidden_ha_membership_does_not_become_an_empty_set(
     await coordinator.async_refresh()
     assert not coordinator.last_update_success
     assert isinstance(coordinator.last_exception, UpdateFailed)
+
+
+@pytest.mark.parametrize(
+    "error", [api_error(401, "Unauthorized", "revoked"), ProxmoxAuthError("Code 401")]
+)
+async def test_admin_auth_failure_creates_repair_without_primary_reauth(
+    hass: HomeAssistant, current_entry: MockConfigEntry, error: Exception
+) -> None:
+    """Refused optional credentials must not start primary reauthentication."""
+    proxmox = _api(error, [])
+    proxmox.is_ha_admin = True
+    with pytest.raises(UpdateFailed, match="Optional cluster credentials"):
+        await poll_api(
+            hass, current_entry, proxmox, "cluster/ha/resources", ProxmoxType.Proxmox
+        )
+    assert not hass.config_entries.flow.async_progress()
+    issue_id = f"{current_entry.entry_id}_cluster_auth"
+    assert ir.async_get(hass).async_get_issue(DOMAIN, issue_id)
+    await poll_api(
+        hass, current_entry, proxmox, "cluster/ha/resources", ProxmoxType.Proxmox
+    )
+    assert ir.async_get(hass).async_get_issue(DOMAIN, issue_id) is None

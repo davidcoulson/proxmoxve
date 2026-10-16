@@ -254,6 +254,7 @@ class ProxmoxVE:
         # The configured host first, then whatever the cluster says its other
         # nodes answer on. Only the first is ever written anywhere.
         self._hosts: list[str] = [host]
+        self.is_ha_admin = False
         self._host_index = 0
         self._port = port
         self._switch_lock = asyncio.Lock()
