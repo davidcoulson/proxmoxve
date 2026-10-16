@@ -26,6 +26,7 @@ from ._vendor.aioproxmox.exceptions import ProxmoxAPIError, ProxmoxAuthError
 from .api import CONNECTION_ERRORS, auth_error_status, get_api
 from .const import (
     CONF_GUEST_FILE_PATH,
+    CONF_HA_ADMIN_USERNAME,
     CONF_NODE,
     CONF_UPDATE_INTERVAL,
     DOMAIN,
@@ -1159,6 +1160,9 @@ class ProxmoxHAResourcesCoordinator(DataUpdateCoordinator[set[str]]):
             ProxmoxType.Proxmox,
             self.resource_id,
         )
+        if resources is None:
+            msg = "HA resource membership is not available"
+            raise UpdateFailed(msg)
         return {
             resource["sid"]
             for resource in (resources or [])

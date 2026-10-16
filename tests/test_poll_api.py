@@ -15,7 +15,10 @@ from custom_components.proxmoxve import DOMAIN
 from custom_components.proxmoxve._vendor.aioproxmox.exceptions import ProxmoxAuthError
 from custom_components.proxmoxve.api import ProxmoxClient
 from custom_components.proxmoxve.const import ProxmoxType
-from custom_components.proxmoxve.coordinator import poll_api
+from custom_components.proxmoxve.coordinator import (
+    ProxmoxHAResourcesCoordinator,
+    poll_api,
+)
 
 from .const import USER_INPUT_OK
 from .fake_api import api_error, connection_refused
@@ -200,3 +203,43 @@ async def test_a_refused_token_asks_for_credentials(hass: HomeAssistant) -> None
             hass, entry, proxmox, "nodes/pve/status", ProxmoxType.Node, "pve"
         )
     assert proxmox.request.await_count == 1
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "cluster/ha/resources",
+        "cluster/ha/status/current",
+        "cluster/status",
+        "cluster/ceph/status",
+    ],
+)
+async def test_forbidden_cluster_read_creates_permission_repair(
+    hass: HomeAssistant, path: str
+) -> None:
+    """The optional credential label can be built for any cluster read."""
+    entry = MockConfigEntry(
+        domain=DOMAIN, data={**USER_INPUT_OK, "ha_admin_username": "audit-user"}
+    )
+    entry.add_to_hass(hass)
+    assert (
+        await poll_api(hass, entry, _api(FORBIDDEN), path, ProxmoxType.Proxmox, path)
+        is None
+    )
+    issue = ir.async_get(hass).async_get_issue(DOMAIN, f"{entry.entry_id}_forbidden")
+    assert issue is not None
+    assert "audit-user" in issue.translation_placeholders["items"]
+
+
+async def test_forbidden_ha_membership_does_not_become_an_empty_set(
+    hass: HomeAssistant,
+) -> None:
+    """Unreadable HA membership fails the refresh rather than unmanaging guests."""
+    entry = MockConfigEntry(domain=DOMAIN, data=USER_INPUT_OK)
+    entry.add_to_hass(hass)
+    coordinator = ProxmoxHAResourcesCoordinator(
+        hass=hass, proxmox=_api(FORBIDDEN), config_entry=entry
+    )
+    await coordinator.async_refresh()
+    assert not coordinator.last_update_success
+    assert isinstance(coordinator.last_exception, UpdateFailed)
