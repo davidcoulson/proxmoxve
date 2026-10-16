@@ -17,9 +17,9 @@ from homeassistant.helpers.typing import UNDEFINED
 from packaging.version import InvalidVersion, Version
 
 from . import device_info
-from .const import CONF_NODES, COORDINATORS, RESOURCE_CALLBACKS, ProxmoxType
+from .const import CONF_NODES, COORDINATORS, ProxmoxType
 from .discovery import selected
-from .entity import ProxmoxEntity, ProxmoxEntityDescription
+from .entity import ProxmoxEntity, ProxmoxEntityDescription, async_setup_entity_builders
 
 if TYPE_CHECKING:
     from homeassistant.config_entries import ConfigEntry
@@ -163,16 +163,12 @@ async def async_setup_entry(
     async_add_entities: AddEntitiesCallback,
 ) -> None:
     """Set up the per-node update entities."""
-    async_add_entities(await async_setup_updates(hass, config_entry))
-
-    async def _async_add_resource(api_category: ProxmoxType, resource_id: str) -> None:
-        """Build the update entity of a node discovery found at runtime."""
-        if api_category is ProxmoxType.Node:
-            async_add_entities(
-                await async_setup_updates(hass, config_entry, [resource_id])
-            )
-
-    config_entry.runtime_data[RESOURCE_CALLBACKS].append(_async_add_resource)
+    await async_setup_entity_builders(
+        hass,
+        config_entry,
+        async_add_entities,
+        (async_setup_updates,),
+    )
 
 
 async def async_setup_updates(
@@ -189,13 +185,6 @@ async def async_setup_updates(
         node_coordinator = coordinators.get(f"{ProxmoxType.Node}_{node}")
         if coordinator is None or node_coordinator is None:
             continue
-        # Reading `apt/update` needs Sys.Modify. Without it the coordinator
-        # reports nothing (and raises a repair issue saying which permission
-        # is missing), and an update entity that can never know anything is
-        # worse than none.
-        if coordinator.data is None or coordinator.data.total is UNDEFINED:
-            continue
-
         entities.append(
             ProxmoxUpdateEntity(
                 coordinator=coordinator,

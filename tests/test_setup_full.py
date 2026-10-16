@@ -9,6 +9,8 @@ the node coordinators, disks, pools, buttons and the update entity were
 never actually exercised there.
 """
 
+from dataclasses import replace
+
 from homeassistant.config_entries import ConfigEntryState
 from homeassistant.const import STATE_ON
 from homeassistant.core import HomeAssistant
@@ -30,6 +32,7 @@ from custom_components.proxmoxve.const import (
 )
 
 from .fake_api import NODE, FakeProxmox, api_error, lxc_status
+from .test_replication import HEALTHY
 
 
 async def _setup(hass: HomeAssistant, entry: MockConfigEntry) -> None:
@@ -376,3 +379,98 @@ async def test_deselecting_the_node_removes_its_disk_and_pool_devices(
     assert result["reason"] == "changes_successful"
     assert dev_reg.async_get(pool.id) is None
     assert dev_reg.async_get(disk.id) is None
+
+
+async def test_guest_entities_recover_after_failed_first_read(
+    hass: HomeAssistant, fake_api: FakeProxmox, current_entry: MockConfigEntry
+) -> None:
+    """Unavailable guests already have entities and listeners that keep polling."""
+    path = f"nodes/{NODE}/qemu/101/status/current"
+    healthy = fake_api.routes[path]
+    fake_api.routes[path] = api_error(500, "Internal Server Error", "starting")
+    await _setup(hass, current_entry)
+    coordinator = current_entry.runtime_data[COORDINATORS]["qemu_101"]
+    assert coordinator.data is None
+    assert er.async_get(hass).async_get_entity_id(
+        "button", DOMAIN, f"{current_entry.entry_id}_101_shutdown"
+    )
+    state = _state(
+        hass, current_entry, f"{current_entry.entry_id}_101_status_raw", "sensor"
+    )
+    assert state.state == "unavailable"
+    fake_api.routes[path] = healthy
+    await coordinator.async_refresh()
+    await hass.async_block_till_done()
+    assert (
+        _state(
+            hass, current_entry, f"{current_entry.entry_id}_101_status_raw", "sensor"
+        ).state
+        == "running"
+    )
+
+
+async def test_new_response_keys_add_entities_once(
+    hass: HomeAssistant, fake_api: FakeProxmox, current_entry: MockConfigEntry
+) -> None:
+    """Cold hardware, replication and the first backup appear without a reload."""
+    backup_path = f"nodes/{NODE}/tasks?typefilter=vzdump&source=archive&limit=1"
+    backup = fake_api.routes[backup_path]
+    fake_api.routes[backup_path] = []
+    await _setup(hass, current_entry)
+    coordinators = current_entry.runtime_data[COORDINATORS]
+    registry = er.async_get(hass)
+    before = set(registry.entities)
+    node = coordinators["node_pve"]
+    node.async_set_updated_data(
+        replace(node.data, sensors={"coretemp-isa-0000 Package id 0": 57.0})
+    )
+    fake_api.routes[f"nodes/{NODE}/replication"] = [HEALTHY]
+    fake_api.routes[backup_path] = backup
+    await coordinators["replication_pve"].async_refresh()
+    await coordinators["backup_pve"].async_refresh()
+    await hass.async_block_till_done()
+    added = [
+        registry.entities[key].unique_id for key in set(registry.entities) - before
+    ]
+    assert any("coretemp" in key for key in added)
+    assert any("replication_pve" in key for key in added)
+    assert any("backup_pve" in key for key in added)
+    count = len(registry.entities)
+    node.async_update_listeners()
+    coordinators["replication_pve"].async_update_listeners()
+    coordinators["backup_pve"].async_update_listeners()
+    await hass.async_block_till_done()
+    assert len(registry.entities) == count
+
+
+async def test_stopped_container_and_unreadable_vm_fields_recover(
+    hass: HomeAssistant, fake_api: FakeProxmox, current_entry: MockConfigEntry
+) -> None:
+    """IP and disk entities exist before a stopped or unreadable guest reports."""
+    lxc_path = f"nodes/{NODE}/lxc/100/status/current"
+    healthy_lxc = fake_api.routes[lxc_path]
+    fake_api.routes[lxc_path] = lxc_status(100, "lxc-test-100", "stopped")
+    disk_path = f"nodes/{NODE}/qemu/101/agent/get-fsinfo"
+    healthy_disk = fake_api.routes[disk_path]
+    fake_api.routes[disk_path] = api_error(
+        500, "Internal Server Error", "agent starting"
+    )
+    await _setup(hass, current_entry)
+    registry = er.async_get(hass)
+    for suffix in ("100_ip_address", "101_disk_used"):
+        assert registry.async_get_entity_id(
+            "sensor", DOMAIN, f"{current_entry.entry_id}_{suffix}"
+        )
+    coordinators = current_entry.runtime_data[COORDINATORS]
+    fake_api.routes[lxc_path] = healthy_lxc
+    fake_api.routes[disk_path] = healthy_disk
+    await coordinators["lxc_100"].async_refresh()
+    await coordinators["qemu_101"].async_refresh()
+    await hass.async_block_till_done()
+    assert (
+        _state(
+            hass, current_entry, f"{current_entry.entry_id}_100_ip_address", "sensor"
+        ).state
+        == "192.0.2.20"
+    )
+    assert coordinators["qemu_101"].data.disk_used > 0

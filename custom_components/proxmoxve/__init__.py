@@ -1359,6 +1359,7 @@ def device_info(
         model = "Cluster"
 
     elif api_category in (ProxmoxType.QEMU, ProxmoxType.LXC):
+        vm_name = str(resource_id)
         coordinator = coordinators[f"{api_category}_{resource_id}"]
         if (coordinator_data := coordinator.data) is not None:
             vm_name = coordinator_data.name
@@ -1378,7 +1379,11 @@ def device_info(
         if (coordinator_data := coordinator.data) is not None:
             node = coordinator_data.node
 
-        name = cordinator_resource.name
+        name = (
+            cordinator_resource.name
+            if cordinator_resource
+            else storage_name(resource_id)
+        )
         identifier = f"{config_entry.entry_id}_{api_category.upper()}_{resource_id.replace('storage/', '')}"
         if is_shared_storage_id(resource_id):
             # One device for the whole cluster; the web interface still
@@ -1395,6 +1400,7 @@ def device_info(
             model = api_category.capitalize()
 
     elif api_category in (ProxmoxType.Node, ProxmoxType.Update):
+        model_processor = None
         coordinator = coordinators[f"{ProxmoxType.Node}_{node}"]
         if (coordinator_data := coordinator.data) is not None:
             model_processor = coordinator_data.model
