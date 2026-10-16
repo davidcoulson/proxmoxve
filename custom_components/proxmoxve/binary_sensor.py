@@ -673,13 +673,14 @@ class ProxmoxBinarySensorEntity(ProxmoxEntity, BinarySensorEntity):
         self._attr_device_info = info_device
 
     @property
-    def is_on(self) -> bool:
-        """Return the state of the binary sensor."""
+    def is_on(self) -> bool | None:
+        """Return the state of the binary sensor, or unknown for missing data."""
         if (data := self.coordinator.data) is None:
-            return False
+            return None
 
-        if not (data_value := getattr(data, self.entity_description.key)):
-            return False
+        data_value = getattr(data, self.entity_description.key, UNDEFINED)
+        if data_value is UNDEFINED or data_value is None:
+            return None
 
         if self.entity_description.inverted:
             return data_value not in self.entity_description.on_value
