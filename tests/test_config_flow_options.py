@@ -511,3 +511,22 @@ async def test_options_flow_advanced_keeps_the_selection_and_sets_the_interval(
     assert options[CONF_ENTITY_ID_PREFIX] == "pve"
     # Set before, shown on the other form, untouched here.
     assert options[CONF_AUTO_DISCOVERY] is True
+
+
+async def test_advanced_options_survive_resource_failure(
+    hass: HomeAssistant, current_entry: MockConfigEntry
+) -> None:
+    """Independent options remain editable when storage choices cannot load."""
+    result = await hass.config_entries.options.async_init(current_entry.entry_id)
+    with (
+        patch("custom_components.proxmoxve.config_flow.ProxmoxClient.build_client"),
+        patch("custom_components.proxmoxve.config_flow.ProxmoxClient.get_api_client"),
+        patch(
+            "custom_components.proxmoxve.config_flow.get_api", side_effect=TimeoutError
+        ),
+    ):
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"], {"next_step_id": "advanced"}
+        )
+    assert result["type"] == FlowResultType.FORM
+    assert result["step_id"] == "advanced"

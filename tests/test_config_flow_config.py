@@ -4,6 +4,8 @@
 
 from unittest.mock import patch
 
+import pytest
+
 from homeassistant.config_entries import (
     SOURCE_USER,
 )
@@ -37,7 +39,7 @@ from .const import (
     USER_INPUT_SELECTION,
     USER_INPUT_USER_HOST,
 )
-from .fake_api import ssl_rejection
+from .fake_api import api_error, ssl_rejection
 
 
 async def test_flow_ok(hass: HomeAssistant) -> None:
@@ -318,3 +320,35 @@ async def test_an_empty_selection_without_discovery_asks_for_a_node(
 
     assert result["type"] == FlowResultType.CREATE_ENTRY
     assert result["data"][CONF_NODES] == ["pve"]
+
+
+@pytest.mark.parametrize(
+    ("error", "field", "message"),
+    [
+        (TimeoutError(), CONF_HOST, "cant_connect"),
+        (ProxmoxAuthError("Code 401"), CONF_USERNAME, "auth_error"),
+        (ssl_rejection(), CONF_VERIFY_SSL, "ssl_rejection"),
+        (api_error(403, "Forbidden", "denied"), "base", "no_resources"),
+        (api_error(401, "Unauthorized", "expired"), "base", "auth_error"),
+    ],
+)
+async def test_resource_failure_after_login_keeps_host_form(
+    hass: HomeAssistant, error: Exception, field: str, message: str
+) -> None:
+    """A successful login followed by a failed listing is a recoverable form."""
+    result = await hass.config_entries.flow.async_init(
+        DOMAIN, context={"source": SOURCE_USER}
+    )
+    with (
+        patch("custom_components.proxmoxve.config_flow.ProxmoxClient.build_client"),
+        patch("custom_components.proxmoxve.config_flow.ProxmoxClient.get_api_client"),
+        patch("custom_components.proxmoxve.config_flow.get_api", side_effect=error),
+    ):
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], USER_INPUT_USER_HOST
+        )
+    assert result["step_id"] == "host"
+    assert result["errors"] == {field: message}
+    schema = result["data_schema"].schema
+    host = next(key for key in schema if key.schema == CONF_HOST)
+    assert host.description["suggested_value"] == USER_INPUT_USER_HOST[CONF_HOST]
