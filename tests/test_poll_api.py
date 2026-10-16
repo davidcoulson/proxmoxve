@@ -17,6 +17,7 @@ from custom_components.proxmoxve.api import ProxmoxClient
 from custom_components.proxmoxve.const import ProxmoxType
 from custom_components.proxmoxve.coordinator import (
     ProxmoxHAResourcesCoordinator,
+    ProxmoxTaskCoordinator,
     poll_api,
 )
 
@@ -265,3 +266,28 @@ async def test_admin_auth_failure_creates_repair_without_primary_reauth(
         hass, current_entry, proxmox, "cluster/ha/resources", ProxmoxType.Proxmox
     )
     assert ir.async_get(hass).async_get_issue(DOMAIN, issue_id) is None
+
+
+async def test_tasks_paginate_the_entire_day(
+    hass: HomeAssistant, current_entry: MockConfigEntry
+) -> None:
+    """Count failures beyond the first page while bounding the attribute list."""
+    now = 1800000000
+    tasks = [{"status": "OK", "starttime": now - 100, "endtime": now - 50}] * 500
+    failures = [{"status": "ERROR", "starttime": now - 200, "endtime": now - 150}] * 12
+    proxmox = _api(tasks, failures)
+    coordinator = ProxmoxTaskCoordinator(
+        hass=hass,
+        proxmox=proxmox,
+        config_entry=current_entry,
+        api_category="tasks",
+        node_name="pve",
+    )
+    with patch("custom_components.proxmoxve.coordinator.time.time", return_value=now):
+        await coordinator.async_refresh()
+    assert coordinator.data.failed_count == 12
+    assert len(coordinator.data.recent_failures) == 10
+    assert [call.kwargs["params"] for call in proxmox.request.await_args_list] == [
+        {"since": now - 86400, "limit": 500, "start": 0},
+        {"since": now - 86400, "limit": 500, "start": 500},
+    ]

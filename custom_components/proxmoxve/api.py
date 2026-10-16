@@ -269,9 +269,13 @@ class ProxmoxClient:
 async def get_api(
     proxmox: ProxmoxVE,
     api_path: str,
+    *,
+    params: dict[str, Any] | None = None,
 ) -> Any:
     """Return data from the Proxmox API."""
-    api_result = await proxmox.request("GET", api_path)
+    api_result = await proxmox.request(
+        "GET", api_path, **({"params": params} if params else {})
+    )
     LOGGER.debug("API GET completed")
     return api_result
 

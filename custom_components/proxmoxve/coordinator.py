@@ -2808,19 +2808,36 @@ class ProxmoxTaskCoordinator(ProxmoxCoordinator):
 
     async def _async_update_data(self) -> ProxmoxTaskData:
         """Update data for Proxmox Tasks."""
-        if self.node_name is not None:
-            api_path = f"nodes/{self.node_name}/tasks"
-            api_status = await poll_api(
+        current_time = int(time.time())
+        twenty_four_hours_ago = current_time - 86400
+        if self.node_name is None:
+            msg = f"{self.resource_id} node not found"
+            raise UpdateFailed(msg)
+
+        api_status = []
+        page_size = 500
+        start = 0
+        while True:
+            page = await poll_api(
                 self.hass,
                 self.config_entry,
                 self.proxmox,
-                api_path,
+                f"nodes/{self.node_name}/tasks",
                 ProxmoxType.Tasks,
                 self.resource_id,
+                params={
+                    "since": twenty_four_hours_ago,
+                    "limit": page_size,
+                    "start": start,
+                },
             )
-        else:
-            msg = f"{self.resource_id} node not found"
-            raise UpdateFailed(msg)
+            if page is None:
+                api_status = None
+                break
+            api_status.extend(page)
+            if len(page) < page_size:
+                break
+            start += len(page)
 
         if api_status is None:
             return ProxmoxTaskData(
@@ -2832,9 +2849,6 @@ class ProxmoxTaskCoordinator(ProxmoxCoordinator):
             )
 
         # Filter for failed tasks in the last 24 hours (86400 seconds)
-        current_time = int(time.time())
-        twenty_four_hours_ago = current_time - 86400
-
         failed_tasks = []
         for task in api_status:
             # Task is considered failed if:
@@ -2940,6 +2954,7 @@ async def poll_api(  # noqa: PLR0917
     resource_id: str | int | None = None,
     *,
     issue_crete_permissions: bool | None = True,
+    params: dict[str, Any] | None = None,
 ) -> Any:
     """
     Return data from the Proxmox API, or None for a read the credentials may not make.
@@ -2995,7 +3010,9 @@ async def poll_api(  # noqa: PLR0917
                 return "Unmapped"
 
     try:
-        api_data = await get_api(proxmox, api_path)
+        api_data = await get_api(
+            proxmox, api_path, **({"params": params} if params else {})
+        )
     except ProxmoxAuthError as error:
         # The fresh login with the stored password was refused as well -
         # unless the API only said it is not issuing tickets yet.

@@ -593,6 +593,9 @@ class FakeProxmox:
         answer = self.routes[path]
         if isinstance(answer, Exception):
             raise answer
+        if path.endswith("/tasks") and params and "limit" in params:
+            start = int(params.get("start", 0))
+            answer = answer[start : start + int(params["limit"])]
         return copy.deepcopy(answer)
 
     def paths(self, method: str = "GET") -> list[str]:
