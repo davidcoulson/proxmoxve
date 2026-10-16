@@ -55,9 +55,14 @@ def test_a_grant_does_not_propagate_up_or_sideways() -> None:
     assert not is_granted(PERMISSIONS, "/", "Sys.PowerMgmt")
 
 
-def test_zero_is_not_a_grant() -> None:
-    """Test an explicit 0 - the API's way of saying denied - is denied."""
-    assert not is_granted({"/vms/100": {"VM.PowerMgmt": 0}}, "/vms/100", "VM.PowerMgmt")
+def test_zero_is_an_exact_grant() -> None:
+    """Test zero grants at the exact path without propagating."""
+    permissions = {"/vms/100": {"VM.PowerMgmt": 0}}
+    assert is_granted(permissions, "/vms/100", "VM.PowerMgmt")
+    assert not is_granted(permissions, "/vms/100/child", "VM.PowerMgmt")
+    assert is_granted_anywhere_below(permissions, "/vms", "VM.PowerMgmt")
+    assert is_granted({"/": {"Sys.Modify": 0}}, "/", "Sys.Modify")
+    assert not is_granted({"/": {"Sys.Modify": 0}}, "/nodes/pve", "Sys.Modify")
 
 
 def test_anything_below_counts_for_the_bulk_actions() -> None:
