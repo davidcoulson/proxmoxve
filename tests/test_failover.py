@@ -201,7 +201,7 @@ async def test_simultaneous_failures_reuse_validated_host() -> None:
         MagicMock(),
         CONFIGURED,
         user="ha",
-        token_name="ha",
+        token_name="ha",  # noqa: S106
         token_value="fake",  # noqa: S106
     )
     api.learn_hosts([LEARNED[0]])

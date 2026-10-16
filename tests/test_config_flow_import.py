@@ -4,6 +4,7 @@
 
 from unittest.mock import patch
 
+import pytest
 from homeassistant.config_entries import (
     SOURCE_IMPORT,
 )
@@ -33,7 +34,7 @@ from .const import (
     YAML_INPUT_NOT_EXIST,
     YAML_INPUT_OK,
 )
-from .fake_api import ssl_rejection
+from .fake_api import api_error, ssl_rejection
 
 
 async def test_flow_import_ok(hass: HomeAssistant) -> None:
@@ -272,3 +273,27 @@ async def test_import_accumulates_guests_from_every_node(hass: HomeAssistant) ->
     assert result["data"][CONF_NODES] == ["node-a", "node-b"]
     assert result["data"][CONF_QEMU] == ["101", "102"]
     assert result["data"][CONF_LXC] == ["100", "103"]
+
+
+@pytest.mark.parametrize(
+    ("error", "reason"),
+    [
+        (TimeoutError(), "import_failed"),
+        (api_error(403, "Forbidden", "denied"), "no_resources"),
+        (api_error(401, "Unauthorized", "expired"), "auth_error"),
+    ],
+)
+async def test_import_listing_failure_after_login(
+    hass: HomeAssistant, error: Exception, reason: str
+) -> None:
+    """The node listing is guarded even after authentication succeeds."""
+    with (
+        patch("custom_components.proxmoxve.config_flow.ProxmoxClient.build_client"),
+        patch("custom_components.proxmoxve.config_flow.ProxmoxClient.get_api_client"),
+        patch("custom_components.proxmoxve.config_flow.get_api", side_effect=error),
+    ):
+        result = await hass.config_entries.flow.async_init(
+            DOMAIN, context={"source": SOURCE_IMPORT}, data=YAML_INPUT_OK[DOMAIN]
+        )
+    assert result["type"] == FlowResultType.ABORT
+    assert result["reason"] == reason

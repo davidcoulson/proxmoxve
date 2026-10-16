@@ -4,6 +4,7 @@
 
 from unittest.mock import patch
 
+import pytest
 from homeassistant.config_entries import (
     ConfigEntryState,
 )
@@ -43,7 +44,7 @@ from .const import (
     USER_INPUT_OPTION_AUTH,
     mock_config_entry,
 )
-from .fake_api import FakeProxmox, ssl_rejection
+from .fake_api import FakeProxmox, api_error, ssl_rejection
 
 
 async def test_options_flow_host_auth(hass: HomeAssistant) -> None:
@@ -530,3 +531,28 @@ async def test_advanced_options_survive_resource_failure(
         )
     assert result["type"] == FlowResultType.FORM
     assert result["step_id"] == "advanced"
+
+
+@pytest.mark.parametrize(
+    ("error", "reason"),
+    [
+        (TimeoutError(), "cant_connect"),
+        (api_error(403, "Forbidden", "denied"), "no_resources"),
+        (api_error(401, "Unauthorized", "expired"), "auth_error"),
+    ],
+)
+async def test_selection_listing_failure_after_login(
+    hass: HomeAssistant, current_entry: MockConfigEntry, error: Exception, reason: str
+) -> None:
+    """Options resource loading uses the same error handling as its login."""
+    result = await hass.config_entries.options.async_init(current_entry.entry_id)
+    with (
+        patch("custom_components.proxmoxve.config_flow.ProxmoxClient.build_client"),
+        patch("custom_components.proxmoxve.config_flow.ProxmoxClient.get_api_client"),
+        patch("custom_components.proxmoxve.config_flow.get_api", side_effect=error),
+    ):
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"], {"next_step_id": "change_expose"}
+        )
+    assert result["type"] == FlowResultType.ABORT
+    assert result["reason"] == reason

@@ -2978,7 +2978,8 @@ async def poll_api(  # noqa: PLR0917
                 translation_key="cluster_auth",
                 translation_placeholders={"entry_id": config_entry.entry_id},
             )
-            raise UpdateFailed("Optional cluster credentials were refused") from error
+            msg = "Optional cluster credentials were refused"
+            raise UpdateFailed(msg) from error
         raise ConfigEntryAuthFailed from error
 
     def permission_to_resource(

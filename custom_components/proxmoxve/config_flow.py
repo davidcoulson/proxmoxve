@@ -870,6 +870,10 @@ class ProxmoxVEConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     "port": str(import_config.get(CONF_PORT)),
                 },
             )
+        except ProxmoxAPIError as error:
+            return self.async_abort(
+                reason="auth_error" if error.status == 401 else "no_resources"
+            )
         except Exception:  # pylint: disable=broad-except
             errors[CONF_BASE] = "general_error"
             ir.async_create_issue(

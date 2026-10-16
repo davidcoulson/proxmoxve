@@ -5,7 +5,6 @@
 from unittest.mock import patch
 
 import pytest
-
 from homeassistant.config_entries import (
     SOURCE_USER,
 )
