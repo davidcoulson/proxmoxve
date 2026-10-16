@@ -113,23 +113,32 @@ def loaded_entries(hass: HomeAssistant) -> list[ConfigEntry]:
 
 def entry_tracking_node(hass: HomeAssistant, node: str) -> ConfigEntry | None:
     """Return the loaded entry that tracks `node`, if any does."""
-    for entry in loaded_entries(hass):
-        if node in entry.runtime_data.get(TRACKED, {}).get(CONF_NODES, []):
-            return entry
-    return None
+    matches = [
+        entry
+        for entry in loaded_entries(hass)
+        if node in entry.runtime_data.get(TRACKED, {}).get(CONF_NODES, [])
+    ]
+    if len(matches) > 1:
+        msg = f"Node {node} is ambiguous; target a device instead"
+        raise ServiceValidationError(msg)
+    return matches[0] if matches else None
 
 
 def entry_hosting_guest(
     hass: HomeAssistant, vmid: int
 ) -> tuple[ConfigEntry, str] | None:
-    """Return the entry tracking guest `vmid` and the node it lives on."""
+    """Return the unique entry tracking a guest and the node it lives on."""
+    matches = []
     for entry in loaded_entries(hass):
         coordinators = entry.runtime_data.get(COORDINATORS, {})
         for kind in (ProxmoxType.QEMU, ProxmoxType.LXC):
             coordinator = coordinators.get(f"{kind}_{vmid}")
             if coordinator is not None and coordinator.data is not None:
-                return entry, coordinator.data.node
-    return None
+                matches.append((entry, coordinator.data.node))
+    if len(matches) > 1:
+        msg = f"Guest {vmid} is ambiguous; target a device instead"
+        raise ServiceValidationError(msg)
+    return matches[0] if matches else None
 
 
 def tracked_nodes(entry: ConfigEntry) -> list[str]:
@@ -176,8 +185,11 @@ def resolve_device(
             return [(entry, resource, None)]
         if kind in GUEST_KINDS and resource.isdigit():
             vmid = int(resource)
-            if (hosting := entry_hosting_guest(hass, vmid)) is not None:
-                return [(hosting[0], hosting[1], vmid)]
+            coordinator = entry.runtime_data.get(COORDINATORS, {}).get(
+                f"{kind.lower()}_{vmid}"
+            )
+            if coordinator is not None and coordinator.data is not None:
+                return [(entry, coordinator.data.node, vmid)]
             raise ServiceValidationError(
                 translation_domain=DOMAIN,
                 translation_key="backup_unknown_guest",
