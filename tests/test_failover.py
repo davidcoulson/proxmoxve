@@ -2,6 +2,9 @@
 # SPDX-License-Identifier: MIT
 """Tests for moving to another node of the cluster when the configured one is gone."""
 
+from unittest.mock import AsyncMock, patch
+
+import pytest
 from homeassistant.config_entries import ConfigEntryState
 from homeassistant.core import HomeAssistant
 from pytest_homeassistant_custom_component.common import MockConfigEntry
@@ -118,3 +121,34 @@ async def test_nothing_else_answering_leaves_the_configured_host(
 
     assert not node.last_update_success
     assert client.host == CONFIGURED
+
+
+@pytest.mark.parametrize("method", ["POST", "PUT", "DELETE"])
+async def test_ambiguous_command_failure_is_not_replayed(
+    hass: HomeAssistant, method: str
+) -> None:
+    """A lost response must never execute a command twice."""
+    client = ProxmoxClient(
+        hass,
+        host=CONFIGURED,
+        user="ha",
+        password="secret",  # noqa: S106
+        token_name="ha",  # noqa: S106
+        realm="pve",
+        verify_ssl=False,
+    )
+    with patch(
+        "custom_components.proxmoxve._vendor.aioproxmox.ProxmoxVE._request_once",
+        new=AsyncMock(return_value={}),
+    ):
+        await client.build_client()
+    proxmox = client.get_api_client()
+    proxmox.learn_hosts(list(LEARNED))
+    with (
+        patch.object(proxmox, "_request_once", side_effect=TimeoutError) as request,
+        patch.object(proxmox, "failover", return_value=True) as failover,
+        pytest.raises(TimeoutError),
+    ):
+        await proxmox.request(method, "nodes/pve/vzdump")
+    request.assert_awaited_once()
+    failover.assert_not_awaited()

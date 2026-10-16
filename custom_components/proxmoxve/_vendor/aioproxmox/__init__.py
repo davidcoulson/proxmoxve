@@ -379,7 +379,8 @@ class ProxmoxVE:
             await self.auth.relogin()
             return await self._request_once(method, path, json_data, params)
         except aiohttp.ClientConnectionError, TimeoutError:
-            if len(self._hosts) < 2 or not await self.failover():
+            # A lost response does not prove that a command was not accepted.
+            if method != "GET" or len(self._hosts) < 2 or not await self.failover():
                 raise
             return await self._request_once(method, path, json_data, params)
 
