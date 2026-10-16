@@ -1,3 +1,5 @@
+# Copyright (c) 2019-2026
+# SPDX-License-Identifier: MIT
 """
 Spread an entry's coordinators across the start of the polling interval.
 
