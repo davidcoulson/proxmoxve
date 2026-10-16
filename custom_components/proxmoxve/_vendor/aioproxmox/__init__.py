@@ -1,6 +1,7 @@
 """Proxmox Home Assistant Integration Service."""
 
 import asyncio
+from copy import copy
 import logging
 import ssl
 import time
@@ -344,7 +345,7 @@ class ProxmoxVE:
         ))
         self.auth.base_url = self.base_url
 
-    async def failover(self) -> bool:
+    async def failover(self, failed_host: str) -> bool:
         """Move to the next node that answers, once the current one stopped.
 
         Several requests may hit the dead host at once; the lock lets the
@@ -353,22 +354,27 @@ class ProxmoxVE:
         is in place.
         """
         async with self._switch_lock:
+            if self.host != failed_host:
+                return True
             start = self._host_index
             for offset in range(1, len(self._hosts)):
                 index = (start + offset) % len(self._hosts)
-                self._use_host(index)
+                probe = copy(self)
+                probe.auth = copy(self.auth)
+                probe._use_host(index)
                 try:
-                    await self._request_once("GET", "version")
+                    await probe._request_once("GET", "version")
                 except (ProxmoxError, aiohttp.ClientError, TimeoutError) as err:
-                    _LOGGER.debug("Fallback host %s did not answer: %s", self.host, err)
+                    _LOGGER.debug("Fallback host %s did not answer: %s", probe.host, err)
                     continue
+                self.auth = probe.auth
+                self._use_host(index)
                 _LOGGER.warning(
                     "Proxmox at %s stopped answering; using %s until it is back",
                     self._hosts[start],
                     self.host,
                 )
                 return True
-            self._use_host(start)
             return False
 
     async def request(
@@ -387,12 +393,14 @@ class ProxmoxVE:
         comes first included, since that is where a dead host is met once
         the ticket is an hour old.
         """
+        failed_host = self.host
         try:
             await self.auth.check_and_refresh(method=method)
         except aiohttp.ClientConnectionError, TimeoutError:
-            if len(self._hosts) < 2 or not await self.failover():
+            if len(self._hosts) < 2 or not await self.failover(failed_host):
                 raise
             await self.auth.check_and_refresh(method=method)
+        failed_host = self.host
         try:
             return await self._request_once(method, path, json_data, params)
         except ProxmoxAPIError as err:
@@ -403,7 +411,7 @@ class ProxmoxVE:
             return await self._request_once(method, path, json_data, params)
         except aiohttp.ClientConnectionError, TimeoutError:
             # A lost response does not prove that a command was not accepted.
-            if method != "GET" or len(self._hosts) < 2 or not await self.failover():
+            if method != "GET" or len(self._hosts) < 2 or not await self.failover(failed_host):
                 raise
             return await self._request_once(method, path, json_data, params)
 

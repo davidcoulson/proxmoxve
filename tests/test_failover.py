@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: MIT
 """Tests for moving to another node of the cluster when the configured one is gone."""
 
+import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -14,7 +15,7 @@ from custom_components.proxmoxve._vendor.aioproxmox import ProxmoxVE
 from custom_components.proxmoxve.api import ProxmoxClient
 from custom_components.proxmoxve.const import COORDINATORS, PROXMOX_CLIENT, ProxmoxType
 
-from .fake_api import NODE, FakeProxmox
+from .fake_api import NODE, FakeProxmox, connection_refused
 
 CONFIGURED = "192.168.10.101"
 LEARNED = ("192.0.2.10", "192.0.2.11")
@@ -192,3 +193,28 @@ def test_host_and_port_parsing(
     assert URL(api.base_url).host == "2001:db8::12"
     assert URL(api.base_url).port == 9443
     assert api.auth.base_url == api.base_url
+
+
+async def test_simultaneous_failures_reuse_validated_host() -> None:
+    """Both requests failed on A must recover on B without publishing a probe."""
+    api = ProxmoxVE(
+        MagicMock(), CONFIGURED, user="ha", token_name="ha", token_value="fake"
+    )  # noqa: S106
+    api.learn_hosts([LEARNED[0]])
+    barrier = asyncio.Barrier(2)
+
+    async def request(client: ProxmoxVE, method: str, path: str, *args: object) -> dict:
+        if client.host == CONFIGURED:
+            await barrier.wait()
+            raise connection_refused()
+        if path == "version":
+            assert api.host == CONFIGURED
+            await asyncio.sleep(0)
+        return {"ok": True}
+
+    with patch.object(ProxmoxVE, "_request_once", autospec=True, side_effect=request):
+        results = await asyncio.gather(
+            api.request("GET", "nodes"), api.request("GET", "nodes")
+        )
+    assert results == [{"ok": True}, {"ok": True}]
+    assert api.host == LEARNED[0]
