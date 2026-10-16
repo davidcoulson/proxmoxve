@@ -272,7 +272,7 @@ async def get_api(
 ) -> Any:
     """Return data from the Proxmox API."""
     api_result = await proxmox.request("GET", api_path)
-    LOGGER.debug("API GET Response - %s: %s", api_path, api_result)
+    LOGGER.debug("API GET completed")
     return api_result
 
 
@@ -283,7 +283,7 @@ async def post_api(
 ) -> Any:
     """Post data to Proxmox API."""
     api_result = await proxmox.request("POST", api_path, json_data=kwargs or None)
-    LOGGER.debug("API POST - %s %s: %s", api_path, kwargs or "", api_result)
+    LOGGER.debug("API POST completed")
     return api_result
 
 
@@ -308,7 +308,7 @@ async def put_api(
 ) -> Any:
     """Put data to Proxmox API."""
     api_result = await proxmox.request("PUT", api_path, json_data=kwargs or None)
-    LOGGER.debug("API PUT - %s: %s", api_path, api_result)
+    LOGGER.debug("API PUT completed")
     return api_result
 
 

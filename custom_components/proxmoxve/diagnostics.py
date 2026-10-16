@@ -36,9 +36,69 @@ TO_REDACT_CONFIG = {
     CONF_HA_ADMIN_USERNAME,
     CONF_HA_ADMIN_PASSWORD,
 }
-TO_REDACT_COORD: set[str] = set()
-TO_REDACT_API: set[str] = set()
-TO_REDACT_DATA = {"configuration_url"}
+TO_REDACT_COORD = TO_REDACT_CONFIG | {
+    "guest_file_content",
+    "guest_file_path",
+    "password",
+    "token_value",
+    "key",
+    "signature",
+    "serverid",
+    "ticket",
+    "CSRFPreventionToken",
+    "host",
+    "hostname",
+    "node",
+    "name",
+    "ip",
+    "ip_address",
+    "ip_addresses",
+}
+TO_REDACT_API = TO_REDACT_COORD
+TO_REDACT_DATA = TO_REDACT_COORD | {"configuration_url"}
+
+
+def _redact_identifiers(data: Any, identifiers: set[str]) -> Any:
+    """Remove known host identifiers even inside URLs, ids and dictionary keys."""
+    if isinstance(data, str):
+        for identifier in sorted(identifiers, key=len, reverse=True):
+            data = data.replace(identifier, "**REDACTED**")
+        return data
+    if isinstance(data, dict):
+        return {
+            _redact_identifiers(key, identifiers): _redact_identifiers(
+                value, identifiers
+            )
+            for key, value in data.items()
+        }
+    if isinstance(data, (list, tuple)):
+        return [_redact_identifiers(value, identifiers) for value in data]
+    return data
+
+
+def _host_identifiers(data: Any) -> set[str]:
+    """Collect identifying values before key-based redaction removes them."""
+    identifiers: set[str] = set()
+    if isinstance(data, dict):
+        for key, value in data.items():
+            if key in {
+                "host",
+                "hostname",
+                "node",
+                "name",
+                "ip",
+                "ip_address",
+                "ip_addresses",
+            }:
+                values = value if isinstance(value, (list, tuple)) else [value]
+                identifiers.update(
+                    item for item in values if isinstance(item, str) and item
+                )
+            identifiers.update(_host_identifiers(value))
+    elif isinstance(data, (list, tuple)):
+        for value in data:
+            identifiers.update(_host_identifiers(value))
+    return identifiers
 
 
 def _exclude_registry_cache(attribute: Attribute, _value: Any) -> bool:
@@ -233,6 +293,8 @@ async def async_get_config_entry_diagnostics(
             if state := hass.states.get(entity_entry.entity_id):
                 state_dict = dict(state.as_dict())
                 state_dict.pop("context", None)
+                if entity_entry.unique_id.endswith("_guest_file_content"):
+                    state_dict = None
 
             entities.append(
                 {
@@ -261,13 +323,24 @@ async def async_get_config_entry_diagnostics(
                 coordinator.data
             )
 
-    return {
-        "timestamp": datetime.datetime.now(datetime.UTC),
-        "config_entry": async_redact_data(config_entry.data, TO_REDACT_CONFIG),
-        "options": async_redact_data(config_entry.options, TO_REDACT_CONFIG),
-        "devices": async_redact_data(devices, TO_REDACT_DATA),
-        "proxmox_coordinators": async_redact_data(
-            proxmox_coordinators, TO_REDACT_COORD
-        ),
-        "api_response": async_redact_data(api_data, TO_REDACT_API),
-    }
+    identifiers = _host_identifiers(
+        [
+            dict(config_entry.data),
+            dict(config_entry.options),
+            api_data,
+            proxmox_coordinators,
+        ]
+    )
+    return _redact_identifiers(
+        {
+            "timestamp": datetime.datetime.now(datetime.UTC),
+            "config_entry": async_redact_data(config_entry.data, TO_REDACT_CONFIG),
+            "options": async_redact_data(config_entry.options, TO_REDACT_CONFIG),
+            "devices": async_redact_data(devices, TO_REDACT_DATA),
+            "proxmox_coordinators": async_redact_data(
+                proxmox_coordinators, TO_REDACT_COORD
+            ),
+            "api_response": async_redact_data(api_data, TO_REDACT_API),
+        },
+        identifiers,
+    )
