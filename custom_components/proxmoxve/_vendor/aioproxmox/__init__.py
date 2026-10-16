@@ -310,6 +310,13 @@ class ProxmoxVE:
             if endpoint not in self._hosts:
                 self._hosts.append(endpoint)
 
+    def share_hosts(self, other: "ProxmoxVE") -> None:
+        """Share discovered endpoints while retaining separate authentication."""
+        other.learn_hosts(self.hosts)
+        current = self.host
+        self._hosts = other._hosts
+        self._host_index = self._hosts.index(current)
+
     async def learn_hosts_from_cluster(self) -> None:
         """Ask the cluster where else the API answers and remember it."""
         try:

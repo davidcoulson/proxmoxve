@@ -198,7 +198,11 @@ def test_host_and_port_parsing(
 async def test_simultaneous_failures_reuse_validated_host() -> None:
     """Both requests failed on A must recover on B without publishing a probe."""
     api = ProxmoxVE(
-        MagicMock(), CONFIGURED, user="ha", token_name="ha", token_value="fake"
+        MagicMock(),
+        CONFIGURED,
+        user="ha",
+        token_name="ha",
+        token_value="fake",  # noqa: S106
     )
     api.learn_hosts([LEARNED[0]])
     barrier = asyncio.Barrier(2)
@@ -249,3 +253,34 @@ async def test_expired_ticket_authenticates_on_candidate() -> None:
         assert await api.request("GET", "nodes") == {"ok": True}
     assert api.host == LEARNED[0]
     assert api.auth.pve_auth_ticket == "fresh"
+
+
+async def test_optional_client_shares_discovered_hosts(
+    hass: HomeAssistant, fake_api: FakeProxmox, current_entry: MockConfigEntry
+) -> None:
+    """Both credential sets recover and receive endpoints discovered later."""
+    from custom_components.proxmoxve.const import (  # noqa: PLC0415
+        CONF_HA_ADMIN_PASSWORD,
+        CONF_HA_ADMIN_USERNAME,
+        PROXMOX_HA_ADMIN_CLIENT,
+    )
+
+    hass.config_entries.async_update_entry(
+        current_entry,
+        data={
+            **current_entry.data,
+            CONF_HA_ADMIN_USERNAME: "admin",
+            CONF_HA_ADMIN_PASSWORD: "fake",
+        },
+    )
+    await hass.config_entries.async_setup(current_entry.entry_id)
+    await hass.async_block_till_done()
+    primary = current_entry.runtime_data[PROXMOX_CLIENT]
+    admin = current_entry.runtime_data[PROXMOX_HA_ADMIN_CLIENT]
+    assert admin.hosts == primary.hosts
+    primary.learn_hosts(["192.0.2.99"])
+    assert admin.hosts == primary.hosts
+    fake_api.dead_hosts.add(CONFIGURED)
+    for client in (primary, admin):
+        await client.get_api_client().request("GET", "version")
+        assert client.host == LEARNED[0]
