@@ -1169,7 +1169,7 @@ async def async_setup_entry(hass: HomeAssistant, config_entry: ConfigEntry) -> b
 
         async def _async_add_resource(
             api_category: ProxmoxType, resource_id: str
-        ) -> None:
+        ) -> bool:
             """Build the coordinators, device and entities of a new resource."""
             try:
                 if api_category is ProxmoxType.Node:
@@ -1183,7 +1183,7 @@ async def async_setup_entry(hass: HomeAssistant, config_entry: ConfigEntry) -> b
                     resource_id,
                     error,
                 )
-                return
+                return False
 
             if api_category is ProxmoxType.Node:
                 coordinator_node = await _async_setup_node(
@@ -1196,7 +1196,7 @@ async def async_setup_entry(hass: HomeAssistant, config_entry: ConfigEntry) -> b
                     permissions,
                 )
                 if coordinator_node is None:
-                    return
+                    return False
                 if coordinator_node.data is not None:
                     device_info(
                         hass=hass,
@@ -1209,7 +1209,7 @@ async def async_setup_entry(hass: HomeAssistant, config_entry: ConfigEntry) -> b
                 if not await _async_setup_storage(
                     hass, config_entry, proxmox, resource_id, coordinators, listing
                 ):
-                    return
+                    return False
             elif not await _async_setup_guest(
                 hass,
                 config_entry,
@@ -1219,10 +1219,19 @@ async def async_setup_entry(hass: HomeAssistant, config_entry: ConfigEntry) -> b
                 coordinators,
                 listing,
             ):
-                return
+                return False
+
+            coordinator = coordinators.get(f"{api_category}_{resource_id}")
+            if (
+                coordinator is None
+                or coordinator.data is None
+                or not coordinator.last_update_success
+            ):
+                return False
 
             for add_entities in config_entry.runtime_data[RESOURCE_CALLBACKS]:
                 await add_entities(api_category, resource_id)
+            return True
 
         async def _async_remove_resource(
             api_category: ProxmoxType, resource_id: str

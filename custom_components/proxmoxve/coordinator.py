@@ -44,6 +44,7 @@ from .discovery import (
     remember_resources,
     remove_resource_devices,
     resource_changes,
+    tracked_resources,
 )
 from .disk import disk_matches_id
 from .issues import FORBIDDEN, ResourceLine, note_resource
@@ -1052,7 +1053,7 @@ class ProxmoxDiscoveryCoordinator(DataUpdateCoordinator[dict[str, list[str]]]):
         hass: HomeAssistant,
         proxmox: ProxmoxVE,
         config_entry: ConfigEntry,
-        add_resource: Callable[[ProxmoxType, str], Awaitable[None]],
+        add_resource: Callable[[ProxmoxType, str], Awaitable[bool]],
         remove_resource: Callable[[ProxmoxType, str], Awaitable[None]],
     ) -> None:
         """Initialize the Proxmox discovery coordinator."""
@@ -1087,19 +1088,32 @@ class ProxmoxDiscoveryCoordinator(DataUpdateCoordinator[dict[str, list[str]]]):
         if not any(added.values()) and not any(removed.values()):
             return found
 
-        remember_resources(self.config_entry, found)
+        installed = tracked_resources(self.config_entry)
 
         # Gone first, so a guest deleted and recreated under the same id in
         # one interval ends up with fresh coordinators rather than stale ones.
         for api_category, key in RESOURCE_KEYS.items():
             for resource_id in removed[key]:
                 await self._remove_resource(api_category, resource_id)
+                installed[key].remove(resource_id)
+                remember_resources(self.config_entry, installed)
         remove_resource_devices(self.hass, self.config_entry, removed)
 
         # Nodes before guests and storages: their devices hang off the node's.
         for api_category, key in RESOURCE_KEYS.items():
             for resource_id in added[key]:
-                await self._add_resource(api_category, resource_id)
+                try:
+                    success = await self._add_resource(api_category, resource_id)
+                except Exception:
+                    LOGGER.exception(
+                        "Discovery: could not add %s %s", api_category, resource_id
+                    )
+                    success = False
+                if not success:
+                    await self._remove_resource(api_category, resource_id)
+                    continue
+                installed[key].append(resource_id)
+                remember_resources(self.config_entry, installed)
         return found
 
 

@@ -168,7 +168,7 @@ def _discovery_coordinator(
     coordinator.config_entry = entry
     coordinator.proxmox = MagicMock()
     coordinator.resource_id = "discovery"
-    add = AsyncMock()
+    add = AsyncMock(return_value=True)
     remove = AsyncMock()
     coordinator._add_resource = add  # noqa: SLF001
     coordinator._remove_resource = remove  # noqa: SLF001
@@ -403,4 +403,58 @@ async def test_a_guest_only_the_cluster_knows_gets_its_entities_at_setup(
     # The storage the fake lists but the entry never picked, likewise.
     assert registry.async_get_entity_id(
         "sensor", DOMAIN, f"{entry_id}_storage/ext_node"
+    )
+
+
+async def test_failed_addition_retries_while_other_additions_succeed(
+    hass: HomeAssistant,
+) -> None:
+    """An unchanged listing retries a failed resource without blocking later ones."""
+    entry = MockConfigEntry(
+        domain=DOMAIN, data={**USER_INPUT_OK, **EVERYTHING, CONF_QEMU: []}
+    )
+    entry.add_to_hass(hass)
+    coordinator, add, remove = _discovery_coordinator(hass, entry)
+    add.side_effect = [RuntimeError("temporary failure"), True, True]
+    with patch(
+        "custom_components.proxmoxve.coordinator.poll_api",
+        return_value=MOCK_GET_RESPONSE,
+    ):
+        await coordinator._async_update_data()  # noqa: SLF001
+        assert tracked_resources(entry)[CONF_QEMU] == ["1001"]
+        remove.assert_awaited_once_with(ProxmoxType.QEMU, "101")
+        await coordinator._async_update_data()  # noqa: SLF001
+    assert set(tracked_resources(entry)[CONF_QEMU]) == {"101", "1001"}
+    assert [call.args for call in add.await_args_list] == [
+        (ProxmoxType.QEMU, "101"),
+        (ProxmoxType.QEMU, "1001"),
+        (ProxmoxType.QEMU, "101"),
+    ]
+
+
+async def test_discovered_guest_recovers_from_first_status_failure(
+    hass: HomeAssistant, fake_api: FakeProxmox, current_entry: MockConfigEntry
+) -> None:
+    """Failed initial guest data is cleaned up and retried on the next poll."""
+    hass.config_entries.async_update_entry(
+        current_entry, options={CONF_AUTO_DISCOVERY: True}
+    )
+    await hass.config_entries.async_setup(current_entry.entry_id)
+    await hass.async_block_till_done()
+    add_guest(fake_api.routes, "qemu", 1001, "vm-new")
+    path = "nodes/pve/qemu/1001/status/current"
+    healthy = fake_api.routes[path]
+    fake_api.routes[path] = TimeoutError()
+    discovery = current_entry.runtime_data[COORDINATORS][
+        f"{ProxmoxType.Proxmox}_discovery"
+    ]
+    await discovery.async_refresh()
+    assert "1001" not in tracked_resources(current_entry)[CONF_QEMU]
+    assert "qemu_1001" not in current_entry.runtime_data[COORDINATORS]
+    fake_api.routes[path] = healthy
+    await discovery.async_refresh()
+    await hass.async_block_till_done()
+    assert "1001" in tracked_resources(current_entry)[CONF_QEMU]
+    assert er.async_get(hass).async_get_entity_id(
+        "sensor", DOMAIN, f"{current_entry.entry_id}_1001_status_raw"
     )
