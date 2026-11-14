@@ -48,6 +48,7 @@ from .const import (
     PROXMOX_HA_ADMIN_CLIENT,
     SLOW_UPDATE_INTERVAL,
     TASKS_UPDATE_INTERVAL,
+    TRACKED,
     UPDATE_INTERVAL,
     UPDATE_INTERVAL_CHOICES,
     ProxmoxType,
@@ -1227,7 +1228,7 @@ class ProxmoxDiscoveryCoordinator(
         hass: HomeAssistant,
         proxmox: ProxmoxAPI,
         config_entry: ConfigEntry,
-        add_resource: Callable[[ProxmoxType, str], Awaitable[None]],
+        add_resource: Callable[[ProxmoxType, str], Awaitable[bool]],
         remove_resource: Callable[[ProxmoxType, str], Awaitable[None]],
     ) -> None:
         """Initialize the Proxmox discovery coordinator."""
@@ -1274,7 +1275,10 @@ class ProxmoxDiscoveryCoordinator(
         # Nodes before guests and storages: their devices hang off the node's.
         for api_category, key in RESOURCE_KEYS.items():
             for resource_id in added[key]:
-                await self._add_resource(api_category, resource_id)
+                if not await self._add_resource(api_category, resource_id):
+                    # Not set up: untrack it so the next poll tries again.
+                    self.config_entry.runtime_data[TRACKED][key].remove(resource_id)
+                    found[key].remove(resource_id)
         return found
 
 
@@ -3404,6 +3408,9 @@ def poll_api(  # noqa: PLR0917
     ) as error:
         raise UpdateFailed(error) from error
     except ResourceException as error:
+        if error.status_code == 401:
+            # A revoked API token: proxmoxer raises ResourceException, not AuthenticationError.
+            raise ConfigEntryAuthFailed from error
         if error.status_code == 403 and issue_crete_permissions:
             # The update coordinator passes "Update <node>" as its resource
             # id; the cluster-wide reads pass none at all. Neither may end

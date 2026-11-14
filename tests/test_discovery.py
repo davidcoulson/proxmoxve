@@ -404,3 +404,27 @@ async def test_a_guest_only_the_cluster_knows_gets_its_entities_at_setup(
     assert registry.async_get_entity_id(
         "sensor", DOMAIN, f"{entry_id}_storage/ext_node"
     )
+
+
+async def test_coordinator_retries_what_could_not_be_set_up(
+    hass: HomeAssistant,
+) -> None:
+    """Test a resource whose setup failed is not tracked, so the next poll retries."""
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={**USER_INPUT_OK, **EVERYTHING, CONF_QEMU: ["101"], CONF_NODES: []},
+    )
+    entry.add_to_hass(hass)
+    coordinator, add, _ = _discovery_coordinator(hass, entry)
+    add.return_value = False
+
+    with patch(
+        "custom_components.proxmoxve.coordinator.poll_api",
+        return_value=MOCK_GET_RESPONSE,
+    ):
+        found = await coordinator._async_update_data()  # noqa: SLF001
+        assert "1001" not in found[CONF_QEMU]
+        assert "1001" not in tracked_resources(entry)[CONF_QEMU]
+        await coordinator._async_update_data()  # noqa: SLF001
+
+    assert add.await_count == 2 * 2

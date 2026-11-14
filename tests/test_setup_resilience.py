@@ -13,6 +13,8 @@ from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 from proxmoxer import AuthenticationError
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 from requests.exceptions import ConnectionError as RequestsConnectionError
+from requests.exceptions import ReadTimeout
+from proxmoxer.core import ResourceException
 
 from .fake_api import NODE, FakeProxmox
 
@@ -141,3 +143,32 @@ async def test_a_node_without_data_leaves_the_other_entities_alone(
     # The sensor platform ran to the end: the node's failed-task sensor is
     # created from the same device description that used to raise.
     assert er.async_get(hass).async_get(f"sensor.node_{NODE}_failed_tasks") is not None
+
+
+@pytest.mark.parametrize(
+    ("error", "state"),
+    [
+        (ReadTimeout("slow"), ConfigEntryState.SETUP_RETRY),
+        (ResourceException(401, "Unauthorized", ""), ConfigEntryState.SETUP_ERROR),
+    ],
+)
+async def test_slow_host_is_retried_and_revoked_token_asks_for_credentials(
+    hass: HomeAssistant,
+    current_entry: MockConfigEntry,
+    error: Exception,
+    state: ConfigEntryState,
+) -> None:
+    """Test a read timeout retries, and a 401 (revoked token) starts reauth."""
+    with (
+        patch("proxmoxer.ProxmoxResource._request", side_effect=error),
+        patch(
+            "proxmoxer.backends.https.ProxmoxHTTPAuth._get_new_tokens",
+            return_value=None,
+        ),
+    ):
+        await hass.config_entries.async_setup(current_entry.entry_id)
+        await hass.async_block_till_done()
+
+    assert current_entry.state is state
+    if state is ConfigEntryState.SETUP_ERROR:
+        assert any(current_entry.async_get_active_flows(hass, {"reauth"}))

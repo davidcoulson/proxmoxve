@@ -281,11 +281,16 @@ class ProxmoxClient:
             for offset in range(1, len(self._hosts)):
                 index = (self._host_index + offset) % len(self._hosts)
                 host = self._hosts[index]
+                proxmox = None
                 try:
                     proxmox = self._build(host)
                     proxmox.version.get()
                 except (AuthenticationError, RequestException) as error:
                     LOGGER.debug("Fallback host %s did not answer: %s", host, error)
+                    if proxmox is not None:
+                        # Nothing holds a failed candidate; don't keep its session.
+                        self._issued[:] = [i for i in self._issued if i is not proxmox]
+                        proxmox._store["session"].close()  # noqa: SLF001
                     continue
                 LOGGER.warning(
                     "Proxmox at %s stopped answering; using %s until it is back",

@@ -37,6 +37,7 @@ from requests.exceptions import (
 )
 from requests.exceptions import (
     ConnectTimeout,
+    ReadTimeout,
     RequestException,
     RetryError,
     SSLError,
@@ -512,12 +513,18 @@ async def _get_api_or_retry_setup(
         return await hass.async_add_executor_job(get_api, proxmox, api_path)
     except AuthenticationError as error:
         raise ConfigEntryAuthFailed from error
+    except ResourceException as error:
+        # With an API token proxmoxer reports a revoked token as a plain 401.
+        if error.status_code == 401:
+            raise ConfigEntryAuthFailed from error
+        msg = f"Connection is unreachable to host {host}"
+        raise ConfigEntryNotReady(msg) from error
     except (
         SSLError,
         ConnectTimeout,
+        ReadTimeout,
         RetryError,
         connError,
-        ResourceException,
     ) as error:
         msg = f"Connection is unreachable to host {host}"
         raise ConfigEntryNotReady(msg) from error
@@ -1238,7 +1245,7 @@ async def async_setup_entry(hass: HomeAssistant, config_entry: ConfigEntry) -> b
 
         async def _async_add_resource(
             api_category: ProxmoxType, resource_id: str
-        ) -> None:
+        ) -> bool:
             """Build the coordinators, device and entities of a new resource."""
             try:
                 if api_category is ProxmoxType.Node:
@@ -1263,7 +1270,7 @@ async def async_setup_entry(hass: HomeAssistant, config_entry: ConfigEntry) -> b
                     resource_id,
                     error,
                 )
-                return
+                return False
 
             if api_category is ProxmoxType.Node:
                 coordinator_node = await _async_setup_node(
@@ -1276,7 +1283,7 @@ async def async_setup_entry(hass: HomeAssistant, config_entry: ConfigEntry) -> b
                     permissions,
                 )
                 if coordinator_node is None:
-                    return
+                    return False
                 if coordinator_node.data is not None:
                     device_info(
                         hass=hass,
@@ -1289,7 +1296,7 @@ async def async_setup_entry(hass: HomeAssistant, config_entry: ConfigEntry) -> b
                 if not await _async_setup_storage(
                     hass, config_entry, proxmox, resource_id, coordinators, listing
                 ):
-                    return
+                    return False
             elif not await _async_setup_guest(
                 hass,
                 config_entry,
@@ -1299,10 +1306,11 @@ async def async_setup_entry(hass: HomeAssistant, config_entry: ConfigEntry) -> b
                 coordinators,
                 listing,
             ):
-                return
+                return False
 
             for add_entities in config_entry.runtime_data[RESOURCE_CALLBACKS]:
                 await add_entities(api_category, resource_id)
+            return True
 
         async def _async_remove_resource(
             api_category: ProxmoxType, resource_id: str

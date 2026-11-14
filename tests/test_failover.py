@@ -458,3 +458,23 @@ async def test_a_node_that_is_off_is_left_alone_from_the_first_refresh(
     # The node listing is cluster-wide and answered by the host itself;
     # everything addressed to the node that is off was skipped.
     assert not [path for path in fake_api.paths() if path.startswith(f"nodes/{NODE}/")]
+
+
+def test_failed_probe_does_not_keep_its_client() -> None:
+    """Test a candidate that fails `version` is neither kept nor left open."""
+    client = _client()
+    _dead_host(client)
+    kept = len(client._issued)  # noqa: SLF001
+    bad = MagicMock()
+    bad.version.get.side_effect = RequestsConnectionError("refused")
+    client._hosts = [CONFIGURED, *LEARNED]  # noqa: SLF001
+
+    def build(host: str) -> MagicMock:
+        client._issued.append(bad)  # noqa: SLF001
+        return bad
+
+    with patch.object(client, "_build", side_effect=build):
+        assert client.failover(client.generation, verify_current=False) is False
+
+    assert len(client._issued) == kept  # noqa: SLF001
+    bad._store["session"].close.assert_called()
