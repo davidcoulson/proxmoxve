@@ -98,10 +98,13 @@ def test_parse_updates_counts_and_orders() -> None:
         "pve-manager",
         "openssl",
     ]
-    # The flat list the existing sensor attribute carries is unchanged.
+    # The attribute of the counting sensor names packages. It listed
+    # apt's Title - the short description - which reads as prose and
+    # cannot be matched on; reported upstream in #702.
     assert data.updates_list == sorted(
-        f"{entry['Title']} - {entry['Version']}" for entry in PENDING
+        f"{entry['Package']} - {entry['Version']}" for entry in PENDING
     )
+    assert data.updates_list[0].startswith("libpve-common-perl - ")
     # The version each package replaces is kept for the release notes.
     assert [entry["old"] for entry in data.packages] == [
         "9.0.8",
@@ -367,3 +370,55 @@ def test_entity_without_node_version() -> None:
 
     assert entity.installed_version == "unknown"
     assert entity.latest_version == "9.0.10-p3-d1"
+
+
+def test_a_pending_set_without_pve_manager_still_counts_as_an_update() -> None:
+    """
+    Test the version id is read as newer, whatever AwesomeVersion makes of it.
+
+    Reported upstream in #711: with nine packages pending and none of them
+    `pve-manager`, the release stays the installed one and only the
+    `-p<n>-d<m>` suffix differs - which AwesomeVersion reads as a SemVer
+    pre-release, ranking `9.1.4-p7-d2` below `9.1.4`. The entity said "up
+    to date" with nine packages waiting.
+    """
+    entity = object.__new__(ProxmoxUpdateEntity)
+
+    assert entity.version_is_newer("9.1.4-p7-d2", "9.1.4") is True
+    assert entity.version_is_newer("9.1.5-p1-d0", "9.1.4") is True
+    assert entity.version_is_newer("9.1.4", "9.1.4") is False
+
+
+def test_proxmox_packages_without_a_release_do_not_announce_one() -> None:
+    """
+    Test the summary does not name a release that is not pending.
+
+    Reported upstream in #711, on the node that confirmed the earlier fix:
+    `libpve-storage-perl` and `qemu-server` pending, `pve-manager` not.
+    The summary said "The newest pending Proxmox version is 9.2.21" - the
+    version already installed - which reads as a release waiting.
+    """
+    pending = [
+        {
+            "Package": "libpve-storage-perl",
+            "Title": "Proxmox VE storage management library",
+            "Version": "9.1.3",
+            "OldVersion": "9.1.2",
+            "Origin": "Proxmox",
+        },
+        {
+            "Package": "qemu-server",
+            "Title": "Qemu Server Tools",
+            "Version": "9.1.5",
+            "OldVersion": "9.1.4",
+            "Origin": "Proxmox",
+        },
+    ]
+    entity = _entity(parse_updates(pending, "pve"), node_version="9.2.21")
+
+    assert entity.release_summary == (
+        "2 package update(s) pending: 2 from Proxmox, 0 from other sources. "
+        "No new Proxmox VE release among them."
+    )
+    # Still an update, as #711 asked for in the first place.
+    assert entity.version_is_newer(entity.latest_version, "9.2.21")

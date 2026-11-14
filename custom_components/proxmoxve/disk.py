@@ -25,7 +25,7 @@ def resolve_disk_id(
         and (colliding_wwns is None or wwn not in colliding_wwns)
     ):
         return wwn
-    if serial := disk.get("serial"):
+    if (serial := disk.get("serial")) and serial != "unknown":
         return serial
     if by_id := disk.get("by_id_link"):
         return by_id
@@ -54,6 +54,6 @@ def disk_matches_id(disk: dict[str, Any], resource_id: str) -> bool:
         return True
     if disk.get("by_id_link") == resource_id:
         return True
-    if disk.get("serial") == resource_id:
+    if disk.get("serial") not in (None, "unknown") and disk["serial"] == resource_id:
         return True
     return disk.get("devpath") == resource_id

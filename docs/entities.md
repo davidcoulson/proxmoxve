@@ -75,15 +75,17 @@ Beyond CPU, memory, swap and disk, each node reports:
 - **`Version`** — the Proxmox VE version, as a diagnostic sensor rather than only on the device page.
 - **`CPUs`** — the node's logical CPU count, diagnostic, disabled by default.
 
-The node's device also carries the hardware addresses of its physical ports, read from the MAC-based interface names Proxmox lists, so Home Assistant can merge it with what a network integration sees of the same machine.
+The node's device also carries the hardware addresses of its physical ports, read from the MAC-based interface names Proxmox lists, so Home Assistant can merge it with what a network integration sees of the same machine. Those names come from each port's permanent address, and two boards can carry the same one — an onboard controller whose address lives in flash that was cloned, for instance, where one node then overrides it in its own configuration. Home Assistant gives an address to one device per integration entry, so the node that comes second goes without it and says so in the log; everything else about that node is unaffected.
 
 ### Package updates
 
 Each node gets a `Software update` entity of Home Assistant's `update` type, so pending package upgrades show up under Settings → Updates and in the update card, next to everything else that wants upgrading. It behaves exactly like the entity in the Home Assistant core integration: the installed version is the node's Proxmox VE release, the latest version is what the pending `pve-manager` would install — that is the package `pveversion` reports, so the bundled Ceph libraries and their own 19.x numbering stay out of it — written as `<version>-p<proxmox packages>-d<other packages>` so it changes whenever the set of pending packages does, and the release notes list every pending package — Proxmox's own first — with the version it moves from and to. *Read release announcement* opens the node's **Updates** panel in the Proxmox web interface.
 
+The entity is on whenever packages are pending, whether or not `pve-manager` is among them — the version it reports then stays the installed release with the pending counts appended, and Home Assistant is told plainly that this counts as an update rather than left to compare the two strings.
+
 It reads `GET /nodes/{node}/apt/update`, which needs `Sys.Modify` on the node. Without that privilege nothing about package updates is created — no entity, no count sensor, and no repair asking for a permission a read-only setup deliberately does not hold. Grant it and reload the integration to get them. The option **Monitor package updates** switches the whole thing off regardless, for a setup that holds the privilege but does not want the entities. There is no install button: the API offers no way to run the upgrade, and a dist-upgrade of a hypervisor is not something to start from a dashboard anyway.
 
-The older `Total updates` sensor and `Updates packages` binary sensor stay as they are.
+The older `Total updates` sensor and `Updates packages` binary sensor stay as they are, except that the `updates_list` attribute now names the packages — `pve-manager - 9.0.6` — where it used to carry apt's short description. A template that matched on that text has to be adjusted; the descriptions are still in the update entity's release notes.
 
 ### Last backup per node
 
@@ -152,7 +154,11 @@ A VM's disk usage comes from inside the guest, through the QEMU guest agent's fi
 
 **`IP address`** — the guest's address, with every address and them by interface as attributes; loopback and link-local are left out, the first IPv4 is shown (the first IPv6 when there is none). A VM reports through the QEMU guest agent (`agent/network-get-interfaces`, `VM.GuestAgent.Audit` on Proxmox VE 9), a container through its own interface list (`VM.Audit`). Diagnostic; created once the address could be read, so a guest that is off at the first start gets it at the next reload.
 
-**`Guest agent`** — for VMs with the agent configured: on while the agent answers, off when it does not (agent not running, VM off). Diagnostic. Whether the agent is configured at all is what decides if the sensor exists.
+**`Guest agent`** — for VMs with the agent configured: on while the agent answers, off when it does not (agent not running, VM off). Diagnostic. Whether the agent is configured at all is what decides if the sensor exists. The agent is only asked while the VM is running (a paused or stopped VM reports off without a request), so a stopped VM does not fill the Proxmox log with failed `agent/*` reads.
+
+**`CPU pressure`**, **`IO pressure`**, **`Memory pressure`** and the three **`… stalled`** counterparts — the Linux kernel's pressure stall information for the guest, each the share of the last ten seconds in which at least one task waited for that resource (`some`) or every task did (`stalled`, the kernel's `full`). Diagnostic, **disabled by default**, and the honest reading differs by guest type: for a **container** these are its own cgroup, so they say what the workload experiences; for a **VM** they are measured on the host for that VM's process, so they say the host is stalling for it — which is also why they exist for a Windows VM. Proxmox VE 8 does not report them; they stay unknown there.
+
+**`Memory used on host`** — for VMs, the memory the guest costs the host, which is more than what it reports using: device models, migration buffers and the like. Diagnostic, **disabled by default**.
 
 **`Snapshots`** — how many snapshots the guest has, with their names (newest first) and when the newest was taken as attributes; read from the guest's snapshot list, the `current` pseudo entry not counted. Diagnostic, **disabled by default**. Pairs with the `Create snapshot` button.
 

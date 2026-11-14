@@ -116,3 +116,14 @@ def test_disk_matches_id_by_wwn():
     }
     assert disk_matches_id(disk, "eui.0025385811b0cf1d")
     assert not disk_matches_id(disk, "other")
+
+
+def test_unknown_serial_is_not_an_id():
+    """Two disks that report serial unknown must not share one id."""
+    disks = [
+        {"serial": "unknown", "devpath": "/dev/vda"},
+        {"serial": "unknown", "devpath": "/dev/vdb"},
+    ]
+    assert [resolve_disk_id(disk) for disk in disks] == ["/dev/vda", "/dev/vdb"]
+    assert not disk_matches_id(disks[0], "unknown")
+    assert resolve_disk_id({"serial": "REAL1", "devpath": "/dev/sda"}) == "REAL1"

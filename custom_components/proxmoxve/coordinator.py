@@ -37,6 +37,7 @@ from requests.exceptions import (
 from .api import ProxmoxClient, get_api
 from .const import (
     CONF_GUEST_FILE_PATH,
+    CONF_HA_ADMIN_USERNAME,
     CONF_NODE,
     CONF_UPDATE_INTERVAL,
     DOMAIN,
@@ -47,6 +48,7 @@ from .const import (
     PROXMOX_HA_ADMIN_CLIENT,
     SLOW_UPDATE_INTERVAL,
     TASKS_UPDATE_INTERVAL,
+    TRACKED,
     UPDATE_INTERVAL,
     UPDATE_INTERVAL_CHOICES,
     ProxmoxType,
@@ -59,7 +61,12 @@ from .discovery import (
     resource_changes,
 )
 from .disk import disk_matches_id
-from .issues import FORBIDDEN, ResourceLine, note_resource_threadsafe
+from .issues import (
+    FORBIDDEN,
+    ResourceLine,
+    note_resource,
+    note_resource_threadsafe,
+)
 from .models import (
     ProxmoxBackupData,
     ProxmoxBackupInfoData,
@@ -102,6 +109,62 @@ def _try_parse_float(raw: object) -> float | None:
         except (ValueError, TypeError):
             return None
     return None
+
+
+# Where PVE-mods puts its readings in the node status. It renamed the
+# field twice: `PveMod_JsonSensorInfo` up to v1.0.7, `PveMods_JsonSensorInfo`
+# in v2.0.0 - a pure rename - and `PveMods_SensorInfo` from v2.1.0, which
+# also changed the shape. All three are read, because all three are
+# installed out there and nothing about the payload says which it is.
+SENSOR_FIELDS: Final = (
+    "PveMods_SensorInfo",
+    "PveMods_JsonSensorInfo",
+    "PveMod_JsonSensorInfo",
+)
+# The block the first shape nests its chips in, under `data`.
+SENSORS_BLOCK: Final = "PVE MOD lm-sensors Enhanced"
+
+
+def _readings_of(payload: dict) -> dict:
+    """
+    Return the chips of a PVE-mods payload in the shape `sensors -j` has.
+
+    Two shapes exist. Up to v2.0.0 the chips sit under `data` in a named
+    block, each reading a flat number called `temp1_input` under the label
+    it carries - `coretemp-isa-0000` -> `Package id 0` -> `temp1_input`.
+
+    From v2.1.0 they sit under `enhanced_sensors`, keyed by the raw sensor
+    id, and a reading became an object: `temp1` -> `label` plus
+    `input` -> {quantity, unit, value}. That is turned back into the older
+    shape here, label and all, so the entities a node already has keep
+    their names and their history across a PVE-mods upgrade.
+    """
+    if isinstance(block := payload.get("data"), dict):
+        nested = block.get(SENSORS_BLOCK)
+        return nested if isinstance(nested, dict) else {}
+
+    chips = payload.get("enhanced_sensors")
+    if not isinstance(chips, dict):
+        return {}
+
+    flattened: dict[str, dict[str, Any]] = {}
+    for chip_name, chip in chips.items():
+        if not isinstance(chip, dict):
+            continue
+        readings: dict[str, Any] = {}
+        for sensor_id, sensor in chip.items():
+            if not isinstance(sensor, dict):
+                # `Adapter`, `cpu_model` and the like, as before.
+                continue
+            value = sensor.get("input")
+            if not isinstance(value, dict) or "value" not in value:
+                continue
+            label = sensor.get("label")
+            name = str(label) if isinstance(label, str) and label else str(sensor_id)
+            readings[name] = {f"{sensor_id}_input": value["value"]}
+        if readings:
+            flattened[str(chip_name)] = readings
+    return flattened
 
 
 def _parse_sensors_dict(data: dict) -> dict[str, float]:
@@ -465,6 +528,29 @@ def parse_guest_addresses(kind: ProxmoxType, payload: Any) -> dict[str, Any]:
         (a for a in addresses if ipaddress.ip_address(a).version == 4), addresses[0]
     )
     return {"ip_address": first, "ip_addresses": addresses, "interfaces": interfaces}
+
+
+# The pressure stall fields as Proxmox names them, and as the guest data
+# carries them. Containers report them as strings ("0.46"), VMs as
+# numbers, and Proxmox VE 8 does not report them at all - so every one of
+# them is read the same forgiving way and stays unknown when it is absent.
+PRESSURE_FIELDS: Final = {
+    "pressure_cpu_some": "pressurecpusome",
+    "pressure_cpu_full": "pressurecpufull",
+    "pressure_io_some": "pressureiosome",
+    "pressure_io_full": "pressureiofull",
+    "pressure_memory_some": "pressurememorysome",
+    "pressure_memory_full": "pressurememoryfull",
+}
+
+
+def parse_pressure(api_status: dict[str, Any]) -> dict[str, Any]:
+    """Return the guest's pressure stall averages, as far as it reports them."""
+    pressure: dict[str, Any] = {}
+    for field, key in PRESSURE_FIELDS.items():
+        value = _try_parse_float(api_status.get(key))
+        pressure[field] = UNDEFINED if value is None else value
+    return pressure
 
 
 def parse_snapshots(entries: Any) -> dict[str, Any]:
@@ -908,8 +994,12 @@ def parse_updates(api_status: list[dict[str, Any]], node: str) -> ProxmoxUpdateD
     packages.sort(key=lambda entry: (not entry["proxmox"], entry["package"]))
     proxmox_updates = sum(1 for entry in packages if entry["proxmox"])
 
+    # The package, not apt's Title: the attribute of a sensor counting
+    # updates was listing short descriptions - "Linux kernel image for
+    # version ..." - where the name is what you act on. Reported upstream
+    # in #702. The titles are still in the update entity's release notes.
     updates_list = sorted(
-        f"{entry['title']} - {entry['version']}" for entry in packages
+        f"{entry['package']} - {entry['version']}" for entry in packages
     )
     total = len(packages)
 
@@ -975,6 +1065,19 @@ RESOURCES_CACHE = "resources_cache"
 # seconds of each other, so one read per burst is enough; well under the
 # interval, so the next burst reads afresh.
 RESOURCES_TTL: Final = 15.0
+# What pveproxy answers when it could not finish passing a request on:
+# the connection to the node stood, the exchange did not complete in
+# time. That is a busy moment, not a refusal and not a node that is
+# gone - 595, which is the connection it could not establish at all,
+# is deliberately not in here: asking again would wait out a second
+# timeout for a node that is down.
+PVEPROXY_BUSY: Final = frozenset({596, 597})
+# The two node reads Proxmox checks against the root rather than against
+# the node, per its own API schema. A Sys.Audit that covers only
+# `/nodes/<name>` lists the disks and is then refused for their SMART
+# data and for the pools - and a repair naming the node would send the
+# user round in circles.
+ROOT_CHECKED_READS: Final = ("/disks/smart", "/disks/zfs")
 
 
 class SharedResources:
@@ -995,6 +1098,9 @@ class SharedResources:
         self._read_at: float = -RESOURCES_TTL
         self._rows: list[dict[str, Any]] | None = None
         self._failure: str | None = None
+        # The nodes the cluster last reported as anything but online.
+        # Read from another thread, so it is replaced, never edited.
+        self.nodes_off: frozenset[str] = frozenset()
 
     async def get(
         self,
@@ -1030,6 +1136,7 @@ class SharedResources:
                     self._failure = (
                         None if isinstance(rows, list) or rows is None else ""
                     )
+                    self.nodes_off = nodes_not_online(self._rows)
                 self._read_at = time.monotonic()
         if self._failure is not None:
             raise UpdateFailed(self._failure or "Cluster resources are not available")
@@ -1037,9 +1144,37 @@ class SharedResources:
             return self._rows
         return [row for row in self._rows if row.get("type") == resource_type]
 
+    def note_nodes(self, rows: Any) -> None:
+        """
+        Take the offline nodes from a `cluster/resources` read made elsewhere.
+
+        Setup makes that read itself, before any coordinator exists. Without
+        this, the node-scoped coordinators of a node that is off each wait
+        out pveproxy's answer on their first refresh - seconds apiece, and
+        Home Assistant waiting for the entry all the while.
+        """
+        if isinstance(rows, list):
+            self.nodes_off = nodes_not_online(rows)
+
     def forget(self) -> None:
         """Make the next caller read again - after something changed the cluster."""
         self._read_at = -RESOURCES_TTL
+
+
+def nodes_not_online(rows: list[dict[str, Any]] | None) -> frozenset[str]:
+    """
+    Return the nodes `cluster/resources` lists as anything but online.
+
+    A node with no status at all is not counted: unknown is not off, and
+    refusing to read from it would be worse than trying.
+    """
+    return frozenset(
+        str(row.get(CONF_NODE))
+        for row in rows or []
+        if row.get("type") == "node"
+        and row.get(CONF_NODE)
+        and str(row.get("status", "")) not in ("", "online")
+    )
 
 
 def shared_resources(hass: HomeAssistant, config_entry: ConfigEntry) -> SharedResources:
@@ -1093,7 +1228,7 @@ class ProxmoxDiscoveryCoordinator(
         hass: HomeAssistant,
         proxmox: ProxmoxAPI,
         config_entry: ConfigEntry,
-        add_resource: Callable[[ProxmoxType, str], Awaitable[None]],
+        add_resource: Callable[[ProxmoxType, str], Awaitable[bool]],
         remove_resource: Callable[[ProxmoxType, str], Awaitable[None]],
     ) -> None:
         """Initialize the Proxmox discovery coordinator."""
@@ -1140,7 +1275,10 @@ class ProxmoxDiscoveryCoordinator(
         # Nodes before guests and storages: their devices hang off the node's.
         for api_category, key in RESOURCE_KEYS.items():
             for resource_id in added[key]:
-                await self._add_resource(api_category, resource_id)
+                if not await self._add_resource(api_category, resource_id):
+                    # Not set up: untrack it so the next poll tries again.
+                    self.config_entry.runtime_data[TRACKED][key].remove(resource_id)
+                    found[key].remove(resource_id)
         return found
 
 
@@ -1618,6 +1756,52 @@ def parse_mac_addresses(interfaces: Any) -> tuple[str, ...]:
     return tuple(found)
 
 
+def node_is_invisible(
+    hass: HomeAssistant,
+    config_entry: ConfigEntry,
+    node: str,
+    listing: Any,
+) -> bool:
+    """
+    Note the credentials as the reason a node is not in the listing.
+
+    Proxmox filters `GET /nodes` by privilege rather than refusing it, so
+    credentials that may audit nothing get an empty list and a node that
+    is running reads as missing. Reported upstream in #712 by someone
+    whose API token had Privilege Separation on and no ACL of its own: the
+    integration said the node could not be found, which sounds like the
+    node is gone, and created no repair because nothing was refused.
+
+    An empty listing is the case this covers. A listing that names other
+    nodes but not this one is a different matter - that node really is not
+    in the cluster, and the repair for a resource that does not exist says
+    so already.
+    """
+    if listing:
+        return False
+    note_resource(
+        hass,
+        config_entry,
+        FORBIDDEN,
+        f"{ProxmoxType.Node}_{node}",
+        ResourceLine(
+            label=f"{ProxmoxType.Node.capitalize()} {node}",
+            permission=f"['perm','/nodes/{node}',['Sys.Audit']]",
+            tracked_as=node,
+        ),
+        listed=True,
+    )
+    LOGGER.warning(
+        "The node listing came back empty, so node %s cannot be read. Proxmox "
+        "filters that listing by privilege, so this is what credentials that "
+        "may not audit the node look like - an API token created with "
+        "Privilege Separation holds only what is granted to the token itself. "
+        "See the repair the integration created",
+        node,
+    )
+    return True
+
+
 class ProxmoxNodeCoordinator(ProxmoxCoordinator):
     """Proxmox VE Node data update coordinator."""
 
@@ -1720,6 +1904,14 @@ class ProxmoxNodeCoordinator(ProxmoxCoordinator):
             if node_status == "":
                 LOGGER.debug("Node %s status is %s", self.resource_id, node_status)
                 node_status = "offline"
+        elif node_is_invisible(
+            self.hass, self.config_entry, self.resource_id, nodes_api
+        ):
+            msg = (
+                f"The node listing is empty, so node {self.resource_id} cannot be "
+                "read - the credentials may not be allowed to see it"
+            )
+            raise UpdateFailed(msg)
 
         if node_status == "online":
             api_path = f"nodes/{self.resource_id}/status"
@@ -1733,7 +1925,17 @@ class ProxmoxNodeCoordinator(ProxmoxCoordinator):
                 self.resource_id,
             )
             if api_status is None:
-                msg = f"Node {self.resource_id} unable to be found in host {self.config_entry.data[CONF_HOST]}"
+                # poll_api hands back None for a read Proxmox refused, and
+                # has already put the privilege it wanted into a repair.
+                # "Unable to be found" read as "the node is gone", which
+                # sent a reporter looking for a renamed node while his API
+                # token simply held no privileges - #712.
+                msg = (
+                    f"Node {self.resource_id} could not be read on "
+                    f"{self.config_entry.data[CONF_HOST]}: the read was refused, so "
+                    "the credentials may not be allowed to see it - see the repair "
+                    "the integration created"
+                )
                 raise UpdateFailed(msg)
 
             api_status["status"] = node_api["status"]
@@ -1827,26 +2029,26 @@ class ProxmoxNodeCoordinator(ProxmoxCoordinator):
                 LOGGER.debug(
                     "Failed to parse sensorsOutput for node %s", self.resource_id
                 )
-        elif isinstance(
-            v2_sensor_info := api_status.get("PveMod_JsonSensorInfo"), dict
+        elif field := next(
+            (name for name in SENSOR_FIELDS if isinstance(api_status.get(name), dict)),
+            None,
         ):
-            # PVE-mods v2 (node_info package): already-decoded object, with
-            # the `sensors -j`-shaped data nested under
-            # data["PVE MOD lm-sensors Enhanced"] and extra per-chip
-            # metadata (Adapter/model/serial/cpu_model/...) mixed in
-            # alongside the sensor readings; _parse_sensors_dict already
-            # ignores anything whose keys don't end in "_input".
-            lm_sensors_data = v2_sensor_info.get("data", {}).get(
-                "PVE MOD lm-sensors Enhanced"
-            )
-            if isinstance(lm_sensors_data, dict):
+            # PVE-mods as a package: an already-decoded object, with the
+            # per-chip metadata (Adapter, cpu_model, serial) mixed in
+            # alongside the readings; _parse_sensors_dict ignores whatever
+            # does not end in "_input".
+            lm_sensors_data = _readings_of(api_status[field])
+            if lm_sensors_data:
                 sensors = _parse_sensors_dict(lm_sensors_data)
                 sensors_raw = json.dumps(lm_sensors_data)
             else:
+                # Also the normal answer of a collector that has gone idle:
+                # it tears itself down after ten seconds, and the field is
+                # then there with the switches in it and no readings.
                 LOGGER.debug(
-                    "Node %s returned PveMod_JsonSensorInfo without the expected "
-                    "lm-sensors block",
+                    "Node %s returned %s without readings",
                     self.resource_id,
+                    field,
                 )
         else:
             LOGGER.debug(
@@ -1935,7 +2137,11 @@ class ProxmoxNodeCoordinator(ProxmoxCoordinator):
                 sensors_raw=sensors_raw,
                 mac_addresses=self._mac_addresses or (),
             )
-        msg = f"Node {self.resource_id} unable to be found in host {self.config_entry.data[CONF_HOST]}"
+        msg = (
+            f"Node {self.resource_id} is not in the node listing of "
+            f"{self.config_entry.data[CONF_HOST]} - it was removed from the cluster, "
+            "or the credentials may not see it"
+        )
         raise UpdateFailed(msg)
 
 
@@ -2062,6 +2268,16 @@ class ProxmoxQEMUCoordinator(ProxmoxCoordinator):
             msg = f"QEMU {self.resource_id} unable to be found"
             raise UpdateFailed(msg)
 
+        # Proxmox answers every agent read with a 500 while the agent is not
+        # enabled for the VM or the VM is not running (a paused VM still says
+        # `status: running`, only `qmpstatus` tells), so asking then only
+        # fills the Proxmox log with failed requests on every poll.
+        agent_configured = bool(api_status.get("agent"))
+        agent_reachable = (
+            agent_configured
+            and api_status.get("qmpstatus", api_status.get("status")) == "running"
+        )
+
         guest_disk_used: int | UndefinedType = UNDEFINED
         guest_disk_total: int | UndefinedType = UNDEFINED
 
@@ -2069,7 +2285,11 @@ class ProxmoxQEMUCoordinator(ProxmoxCoordinator):
             fsinfo_path = (
                 f"nodes/{node_name!s}/qemu/{self.resource_id}/agent/get-fsinfo"
             )
-            fsinfo = await self._poll_guest_agent(fsinfo_path, "fsinfo")
+            fsinfo = (
+                await self._poll_guest_agent(fsinfo_path, "fsinfo")
+                if agent_reachable
+                else None
+            )
 
             entries = fsinfo.get("result", []) if isinstance(fsinfo, dict) else fsinfo
 
@@ -2121,7 +2341,7 @@ class ProxmoxQEMUCoordinator(ProxmoxCoordinator):
         guest_file_path = self.config_entry.options.get(CONF_GUEST_FILE_PATH)
         guest_file_content: str | UndefinedType = UNDEFINED
 
-        if guest_file_path:
+        if guest_file_path and agent_reachable:
             try:
                 file_read_path = (
                     f"nodes/{node_name!s}/qemu/{self.resource_id}/agent/file-read"
@@ -2141,7 +2361,9 @@ class ProxmoxQEMUCoordinator(ProxmoxCoordinator):
         # says no. Not configured for the VM at all leaves it undefined.
         agent_running: bool | UndefinedType = UNDEFINED
         addresses = parse_guest_addresses(ProxmoxType.QEMU, None)
-        if api_status.get("agent"):
+        if agent_configured and not agent_reachable:
+            agent_running = False
+        elif agent_configured:
             try:
                 interfaces = await self._poll_guest_agent(
                     f"nodes/{node_name!s}/qemu/{self.resource_id}/agent/network-get-interfaces",
@@ -2156,7 +2378,7 @@ class ProxmoxQEMUCoordinator(ProxmoxCoordinator):
 
         snapshots = await poll_snapshots(self, ProxmoxType.QEMU, node_name)
 
-        update_device_via(self, ProxmoxType.QEMU, node_name)
+        update_guest_device(self, ProxmoxType.QEMU, node_name, api_status.get("name"))
 
         memory_total = api_status.get("maxmem", UNDEFINED)
         memory_used = qemu_memory_used(api_status)
@@ -2190,6 +2412,8 @@ class ProxmoxQEMUCoordinator(ProxmoxCoordinator):
             **snapshots,
             agent_running=agent_running,
             **addresses,
+            **parse_pressure(api_status),
+            memory_of_host=_try_parse_float(api_status.get("memhost")) or UNDEFINED,
             memory_total=memory_total,
             memory_used=memory_used,
             memory_free=memory_free,
@@ -2297,11 +2521,12 @@ class ProxmoxLXCCoordinator(ProxmoxCoordinator):
                 interfaces = None
             addresses = parse_guest_addresses(ProxmoxType.LXC, interfaces)
 
-        update_device_via(self, ProxmoxType.LXC, node_name)
+        update_guest_device(self, ProxmoxType.LXC, node_name, api_status.get("name"))
 
         return ProxmoxLXCData(
             type=ProxmoxType.LXC,
             node=node_name,
+            **parse_pressure(api_status),
             status=api_status.get("status", UNDEFINED),
             locked=bool(api_status.get("lock")),
             name=api_status.get("name", UNDEFINED),
@@ -2485,10 +2710,21 @@ class ProxmoxZFSCoordinator(ProxmoxCoordinator):
             self.resource_id,
         )
 
-        pool_status = []
-        for pool in pools:
-            if pool["name"] == self.resource_id:
-                pool_status = pool
+        # A refused read hands back nothing - `poll_api` files the repair and
+        # returns None - and iterating that raised a traceback every minute
+        # where one line of "not available" belongs.
+        if pools is None:
+            msg = f"ZFS pools on node {self.node_name} are not available"
+            raise UpdateFailed(msg)
+
+        pool_status = next(
+            (
+                pool
+                for pool in pools
+                if isinstance(pool, dict) and pool.get("name") == self.resource_id
+            ),
+            None,
+        )
 
         if pool_status is None:
             msg = f"ZFS Pool {self.resource_id} unable to be found for Node {self.node_name}"
@@ -2944,12 +3180,13 @@ class ProxmoxTaskCoordinator(ProxmoxCoordinator):
         )
 
 
-def update_device_via(
+def update_guest_device(
     self,
     api_category: ProxmoxType,
     node_name: str,
+    guest_name: str | None = None,
 ) -> None:
-    """Point the guest's device at the node it currently runs on."""
+    """Keep the guest's device on its node, and under the name Proxmox has."""
     dev_reg = dr.async_get(self.hass)
     # Scoped to this config entry: identifiers are only unique within one, so
     # async_get_device can resolve to a device belonging to a different
@@ -2967,6 +3204,19 @@ def update_device_via(
         # after the config entry, with no model and no entities, should
         # nothing come along to fill it in.
         return
+    if guest_name is not None:
+        # A guest renamed in Proxmox keeps its id, so this is the same device
+        # under a new name. A name given in Home Assistant is kept: it lives
+        # in `name_by_user` and is what the interface shows either way.
+        name = f"{api_category.upper()} {guest_name} ({self.resource_id})"
+        if device.name != name:
+            LOGGER.debug(
+                "Update device %s - name: old=%s, new=%s",
+                self.resource_id,
+                device.name,
+                name,
+            )
+            dev_reg.async_update_device(device.id, name=name)
     via_device = dev_reg.async_get_device_by_identifier(
         (
             DOMAIN,
@@ -3069,24 +3319,47 @@ def poll_api(  # noqa: PLR0917
 ) -> dict[str, Any] | None:
     """Return data from the Proxmox Node API."""
 
+    def node_of_path(fallback: str | int | None) -> str:
+        """
+        Return the node a `nodes/{node}/...` read is scoped to.
+
+        The privilege belongs to the node, but what the coordinator knows
+        itself is its resource: a disk id, a pool name. Both are in the
+        path, which every node-scoped read spells out. The two reads of
+        the bare `nodes` listing have no node in the path and pass it as
+        their resource instead, which is what the fallback is for.
+        """
+        parts = api_path.split("?", 1)[0].split("/")
+        if len(parts) >= 2 and parts[0] == "nodes" and parts[1]:
+            return parts[1]
+        return str(fallback) if fallback is not None else ""
+
     def permission_to_resource(
         api_category: ProxmoxType,
         resource_id: int | str | None = None,
     ) -> str:
         """Return the permissions required for the resource."""
         match api_category:
-            case ProxmoxType.Node:
-                return f"['perm','/nodes/{resource_id}',['Sys.Audit']]"
+            case (
+                ProxmoxType.Node
+                | ProxmoxType.Disk
+                | ProxmoxType.ZFS
+                | ProxmoxType.Tasks
+            ):
+                if any(read in api_path for read in ROOT_CHECKED_READS):
+                    return "['perm','/',['Sys.Audit']]"
+                return f"['perm','/nodes/{node_of_path(resource_id)}',['Sys.Audit']]"
             case ProxmoxType.QEMU | ProxmoxType.LXC:
                 return f"['perm','/vms/{resource_id}',['VM.Audit']]"
             case ProxmoxType.Storage:
-                return f"['perm','/storage/{resource_id}',['Datastore.Audit'],'any',1]"
+                # The id carries the node for a per-node storage; the ACL
+                # path is the storage's own name either way.
+                return (
+                    f"['perm','/storage/{storage_name(str(resource_id))}',"
+                    "['Datastore.Audit'],'any',1]"
+                )
             case ProxmoxType.Update:
-                return f"['perm','/nodes/{resource_id}',['Sys.Modify']]"
-            case ProxmoxType.Disk:
-                return f"['perm','/nodes/{resource_id}',['Sys.Audit']]"
-            case ProxmoxType.Tasks:
-                return f"['perm','/nodes/{resource_id}',['Sys.Audit']]"
+                return f"['perm','/nodes/{node_of_path(resource_id)}',['Sys.Modify']]"
             case ProxmoxType.Proxmox:
                 return "['perm','/',['Sys.Audit']]"
             case ProxmoxType.Resources:
@@ -3097,11 +3370,30 @@ def poll_api(  # noqa: PLR0917
             case _:
                 return "Unmapped"
 
+    # Everything goes to one host, which forwards what belongs to another
+    # node. With that node down, pveproxy waits and then answers 595 'No
+    # route to host' - once per guest, storage and node read, every poll,
+    # seconds at a time. The cluster already said the node is off, so
+    # take that answer instead of asking after it.
+    if (node := node_of_path(None)) and node in shared_resources(
+        hass, config_entry
+    ).nodes_off:
+        msg = f"Node {node} is offline"
+        raise UpdateFailed(msg)
+
     client = _client_for(config_entry, proxmox)
     generation = client.generation if client is not None else 0
     try:
         try:
-            api_data = get_api(proxmox, api_path)
+            try:
+                api_data = get_api(proxmox, api_path)
+            except ResourceException as error:
+                if error.status_code not in PVEPROXY_BUSY:
+                    raise
+                # One such moment used to take an entity out for a whole
+                # polling interval; asked again, the node usually answers.
+                LOGGER.debug("Read %s came back %s, asking once more", api_path, error)
+                api_data = get_api(proxmox, api_path)
         except AuthenticationError as error:
             api_data = _retry_after_relogin(config_entry, proxmox, api_path, error)
         except (ConnectTimeout, ConnectionError, connError, RetryError) as error:
@@ -3116,6 +3408,9 @@ def poll_api(  # noqa: PLR0917
     ) as error:
         raise UpdateFailed(error) from error
     except ResourceException as error:
+        if error.status_code == 401:
+            # A revoked API token: proxmoxer raises ResourceException, not AuthenticationError.
+            raise ConfigEntryAuthFailed from error
         if error.status_code == 403 and issue_crete_permissions:
             # The update coordinator passes "Update <node>" as its resource
             # id; the cluster-wide reads pass none at all. Neither may end
@@ -3145,7 +3440,7 @@ def poll_api(  # noqa: PLR0917
                 f"Error get API path {api_path}: User not allowed to access the resource, check user permissions as per the documentation, see details in the repair created by the integration."
             )
             return None
-        raise UpdateFailed from error
+        raise UpdateFailed(str(error)) from error
     note_resource_threadsafe(
         hass, config_entry, FORBIDDEN, f"{api_category}_{resource_id}", listed=False
     )

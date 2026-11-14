@@ -388,3 +388,30 @@ async def test_a_node_with_a_run_in_progress_is_skipped_on_request(
     )
     assert response["skipped"] == []
     assert len(_posts(fake_api)) == 1
+
+
+async def test_a_guest_is_looked_up_in_its_own_entry_only(
+    hass: HomeAssistant,
+) -> None:
+    """Test VM 100 of cluster B is not resolved to VM 100 of cluster A."""
+    from types import SimpleNamespace  # noqa: PLC0415
+
+    from custom_components.proxmoxve.const import COORDINATORS, ProxmoxType  # noqa: PLC0415
+    from custom_components.proxmoxve.services import entry_hosting_guest  # noqa: PLC0415
+
+    def entry(node: str) -> MockConfigEntry:
+        mock = MockConfigEntry(domain=DOMAIN)
+        mock.add_to_hass(hass)
+        mock.runtime_data = {
+            COORDINATORS: {
+                f"{ProxmoxType.QEMU}_100": SimpleNamespace(
+                    data=SimpleNamespace(node=node)
+                )
+            }
+        }
+        return mock
+
+    first, second = entry("a"), entry("b")
+
+    assert entry_hosting_guest(hass, 100) == (first, "a")
+    assert entry_hosting_guest(hass, 100, second) == (second, "b")

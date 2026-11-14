@@ -122,10 +122,10 @@ def entry_tracking_node(hass: HomeAssistant, node: str) -> ConfigEntry | None:
 
 
 def entry_hosting_guest(
-    hass: HomeAssistant, vmid: int
+    hass: HomeAssistant, vmid: int, only: ConfigEntry | None = None
 ) -> tuple[ConfigEntry, str] | None:
-    """Return the entry tracking guest `vmid` and the node it lives on."""
-    for entry in loaded_entries(hass):
+    """Return the entry tracking guest `vmid` (`only`, when given) and its node."""
+    for entry in [only] if only else loaded_entries(hass):
         coordinators = entry.runtime_data.get(COORDINATORS, {})
         for kind in (ProxmoxType.QEMU, ProxmoxType.LXC):
             coordinator = coordinators.get(f"{kind}_{vmid}")
@@ -178,7 +178,7 @@ def resolve_device(
             return [(entry, resource, None)]
         if kind in GUEST_KINDS and resource.isdigit():
             vmid = int(resource)
-            if (hosting := entry_hosting_guest(hass, vmid)) is not None:
+            if (hosting := entry_hosting_guest(hass, vmid, entry)) is not None:
                 return [(hosting[0], hosting[1], vmid)]
             raise ServiceValidationError(
                 translation_domain=DOMAIN,

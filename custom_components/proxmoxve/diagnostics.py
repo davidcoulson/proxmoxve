@@ -5,7 +5,7 @@
 from __future__ import annotations
 
 import dataclasses
-import datetime
+import datetime as dt
 from typing import TYPE_CHECKING, Any
 
 from attr import Attribute, asdict
@@ -18,6 +18,7 @@ from proxmoxer.core import ResourceException
 
 from .api import get_api
 from .const import (
+    CONF_CLUSTER_HOSTS,
     CONF_DISKS_ENABLE,
     CONF_HA_ADMIN_PASSWORD,
     CONF_HA_ADMIN_USERNAME,
@@ -30,6 +31,7 @@ if TYPE_CHECKING:
     from homeassistant.core import HomeAssistant
 
 TO_REDACT_CONFIG = {
+    CONF_CLUSTER_HOSTS,
     CONF_HOST,
     CONF_USERNAME,
     CONF_PASSWORD,
@@ -277,7 +279,7 @@ async def async_get_config_entry_diagnostics(
             )
 
     return {
-        "timestamp": datetime.datetime.now(datetime.UTC),
+        "timestamp": dt.datetime.now(dt.UTC),
         "config_entry": async_redact_data(config_entry.data, TO_REDACT_CONFIG),
         "options": async_redact_data(config_entry.options, TO_REDACT_CONFIG),
         "devices": async_redact_data(devices, TO_REDACT_DATA),

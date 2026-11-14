@@ -14,10 +14,15 @@ from proxmoxer.core import ResourceException
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.proxmoxve import DOMAIN
-from custom_components.proxmoxve.const import PROXMOX_CLIENT, ProxmoxType
+from custom_components.proxmoxve.const import (
+    COORDINATORS,
+    PROXMOX_CLIENT,
+    ProxmoxType,
+)
 from custom_components.proxmoxve.coordinator import poll_api
 
 from .const import USER_INPUT_OK
+from .fake_api import NODE, Answers, FakeProxmox
 
 FORBIDDEN = ResourceException(403, "Forbidden", "Permission check failed")
 
@@ -153,3 +158,249 @@ async def test_without_a_stored_client_the_failure_stands(hass: HomeAssistant) -
         await hass.async_add_executor_job(
             poll_api, hass, entry, proxmox, "nodes/pve/status", ProxmoxType.Node, "pve"
         )
+
+
+@pytest.mark.parametrize(
+    ("api_path", "api_category", "resource_id", "expected"),
+    [
+        # A disk's id is a WWN, and the privilege belongs to its node.
+        (
+            "nodes/pve/disks/list",
+            ProxmoxType.Disk,
+            "0x5002538e40000001",
+            "['perm','/nodes/pve',['Sys.Audit']]",
+        ),
+        # SMART and the pools are checked against the root, not the node:
+        # Proxmox's own schema says `['perm','/',['Sys.Audit']]` for both,
+        # and a repair naming the node sent the user round in circles -
+        # granting it made the disk list work and nothing else.
+        (
+            "nodes/pve/disks/smart?disk=/dev/sda",
+            ProxmoxType.Disk,
+            "0x5002538e40000001",
+            "['perm','/',['Sys.Audit']]",
+        ),
+        (
+            "nodes/pve/disks/zfs",
+            ProxmoxType.ZFS,
+            "rpool",
+            "['perm','/',['Sys.Audit']]",
+        ),
+        # A storage id carries its node; the ACL path is the bare name.
+        (
+            "nodes/pve/storage?storage=local",
+            ProxmoxType.Storage,
+            "storage/pve/local",
+            "['perm','/storage/local',['Datastore.Audit'],'any',1]",
+        ),
+        (
+            "nodes/pve/storage?storage=nas",
+            ProxmoxType.Storage,
+            "storage/nas",
+            "['perm','/storage/nas',['Datastore.Audit'],'any',1]",
+        ),
+        # These were already right, and stay right.
+        (
+            "nodes/pve/status",
+            ProxmoxType.Node,
+            "pve",
+            "['perm','/nodes/pve',['Sys.Audit']]",
+        ),
+        (
+            "nodes/pve/tasks",
+            ProxmoxType.Tasks,
+            "pve",
+            "['perm','/nodes/pve',['Sys.Audit']]",
+        ),
+        (
+            "nodes/pve/apt/update",
+            ProxmoxType.Update,
+            "Update pve",
+            "['perm','/nodes/pve',['Sys.Modify']]",
+        ),
+        (
+            "nodes/pve/qemu/101/status/current",
+            ProxmoxType.QEMU,
+            "101",
+            "['perm','/vms/101',['VM.Audit']]",
+        ),
+        # The bare listing has no node in the path; the read passes it.
+        ("nodes", ProxmoxType.Node, "pve", "['perm','/nodes/pve',['Sys.Audit']]"),
+    ],
+)
+async def test_the_repair_names_the_path_the_privilege_belongs_to(
+    hass: HomeAssistant,
+    api_path: str,
+    api_category: ProxmoxType,
+    resource_id: str,
+    expected: str,
+) -> None:
+    """Test a refused read names an ACL path Proxmox actually has."""
+    entry = MockConfigEntry(domain=DOMAIN, data=USER_INPUT_OK)
+    entry.add_to_hass(hass)
+    proxmox = MagicMock()
+    proxmox.get.side_effect = FORBIDDEN
+
+    await hass.async_add_executor_job(
+        poll_api, hass, entry, proxmox, api_path, api_category, resource_id
+    )
+    await hass.async_block_till_done()
+
+    issue = ir.async_get(hass).async_get_issue(DOMAIN, f"{entry.entry_id}_forbidden")
+    assert issue is not None
+    assert expected in issue.translation_placeholders["items"]
+
+
+async def test_a_cluster_wide_refusal_raises_a_repair_not_a_name_error(
+    hass: HomeAssistant,
+) -> None:
+    """
+    Test the cluster-wide branch works at all.
+
+    It names the optional HA-admin credentials, and that constant was used
+    without being imported - so in the one situation the repair exists for,
+    the handler raised `NameError`.
+    """
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={**USER_INPUT_OK, "ha_admin_username": "ha-admin"},
+    )
+    entry.add_to_hass(hass)
+    proxmox = MagicMock()
+    proxmox.get.side_effect = FORBIDDEN
+
+    result = await hass.async_add_executor_job(
+        poll_api,
+        hass,
+        entry,
+        proxmox,
+        "cluster/ceph/status",
+        ProxmoxType.Proxmox,
+        None,
+    )
+    await hass.async_block_till_done()
+
+    assert result is None
+    issue = ir.async_get(hass).async_get_issue(DOMAIN, f"{entry.entry_id}_forbidden")
+    assert issue is not None
+    assert "ha-admin" in issue.translation_placeholders["items"]
+    assert "['perm','/',['Sys.Audit']]" in issue.translation_placeholders["items"]
+
+
+async def test_a_busy_proxy_is_asked_once_more(
+    hass: HomeAssistant, fake_api: FakeProxmox, current_entry: MockConfigEntry
+) -> None:
+    """
+    Test a read pveproxy could not finish is repeated instead of given up on.
+
+    Reported in #595: a storage went unavailable every so often, and once
+    5.3.2 named the reason it was `596 Errors during TLS negotiation,
+    request sending and header processing: Connection timed out` -
+    pveproxy passed the request on and the answer did not come back in
+    time. Nothing refused it and no node was gone; the node was busy for
+    a moment, and that moment took the entity out for a whole polling
+    interval.
+    """
+    await hass.config_entries.async_setup(current_entry.entry_id)
+    await hass.async_block_till_done()
+    key = f"{ProxmoxType.Storage}_storage/{NODE}/local"
+    coordinator = current_entry.runtime_data[COORDINATORS][key]
+    path = f"nodes/{NODE}/storage?storage=local"
+    fake_api.routes[path] = Answers(
+        ResourceException(
+            596,
+            "Errors during TLS negotiation, request sending and header processing",
+            "Connection timed out",
+        ),
+        fake_api.routes[path],
+    )
+    fake_api.calls.clear()
+
+    await coordinator.async_refresh()
+
+    assert coordinator.last_update_success
+    assert fake_api.paths().count(path) == 2
+
+
+async def test_a_proxy_that_cannot_reach_the_node_is_not_asked_twice(
+    hass: HomeAssistant, fake_api: FakeProxmox, current_entry: MockConfigEntry
+) -> None:
+    """
+    Test 595 is taken at its word: the node is not there.
+
+    `595 No route to host` is the connection pveproxy could not establish
+    at all, which is what a node that is switched off answers. Asking
+    again would only wait out a second timeout - up to 25 seconds on a
+    live cluster - for an answer that cannot come.
+    """
+    await hass.config_entries.async_setup(current_entry.entry_id)
+    await hass.async_block_till_done()
+    key = f"{ProxmoxType.Storage}_storage/{NODE}/local"
+    coordinator = current_entry.runtime_data[COORDINATORS][key]
+    path = f"nodes/{NODE}/storage?storage=local"
+    fake_api.routes[path] = ResourceException(595, "No route to host", "")
+    fake_api.calls.clear()
+
+    await coordinator.async_refresh()
+
+    assert not coordinator.last_update_success
+    assert fake_api.paths().count(path) == 1
+
+
+async def test_a_refused_node_read_blames_the_credentials(
+    hass: HomeAssistant, fake_api: FakeProxmox, current_entry: MockConfigEntry
+) -> None:
+    """
+    Test a node nobody may read is reported as that, not as missing.
+
+    Reported upstream in #712: an API token with Privilege Separation on
+    and no ACL of its own is refused every node read, and the integration
+    answered `Node pve unable to be found in host …`. That reads as "the
+    node is gone", and sent the reporter - and me - looking for a renamed
+    node while the privileges were the whole story. The repair naming the
+    privilege was there all along; the message talked past it.
+    """
+    await hass.config_entries.async_setup(current_entry.entry_id)
+    await hass.async_block_till_done()
+    coordinator = current_entry.runtime_data[COORDINATORS][f"{ProxmoxType.Node}_{NODE}"]
+    fake_api.routes[f"nodes/{NODE}/status"] = ResourceException(
+        403, "Permission check failed", f"(/nodes/{NODE}, Sys.Audit)"
+    )
+
+    await coordinator.async_refresh()
+
+    assert not coordinator.last_update_success
+    reason = str(coordinator.last_exception)
+    assert "refused" in reason
+    assert "may not be allowed to see it" in reason
+    assert "unable to be found" not in reason
+
+
+async def test_a_listing_that_goes_empty_says_what_it_means(
+    hass: HomeAssistant,
+    fake_api: FakeProxmox,
+    current_entry: MockConfigEntry,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """
+    Test privileges taken away while running are named as the reason.
+
+    Proxmox filters `GET /nodes` by privilege instead of refusing it, so
+    credentials that may no longer audit anything get an empty list rather
+    than a 403 - and nothing is refused, so nothing would create a repair.
+    The node would simply read as gone.
+    """
+    await hass.config_entries.async_setup(current_entry.entry_id)
+    await hass.async_block_till_done()
+    coordinator = current_entry.runtime_data[COORDINATORS][f"{ProxmoxType.Node}_{NODE}"]
+    fake_api.routes["nodes"] = []
+
+    await coordinator.async_refresh()
+
+    assert not coordinator.last_update_success
+    assert "may not be allowed to see it" in str(coordinator.last_exception)
+    assert "Privilege Separation" in caplog.text
+    assert any(
+        issue.domain == DOMAIN and "forbidden" in issue.issue_id
+        for issue in ir.async_get(hass).issues.values()
+    )

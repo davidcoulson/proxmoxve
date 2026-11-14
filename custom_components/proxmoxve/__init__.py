@@ -37,6 +37,7 @@ from requests.exceptions import (
 )
 from requests.exceptions import (
     ConnectTimeout,
+    ReadTimeout,
     RequestException,
     RetryError,
     SSLError,
@@ -46,6 +47,7 @@ from urllib3.exceptions import InsecureRequestWarning
 from .api import ProxmoxClient, auth_error_status, get_api
 from .const import (
     CONF_AUTO_DISCOVERY,
+    CONF_CLUSTER_HOSTS,
     CONF_CONTAINERS,
     CONF_DISKS_ENABLE,
     CONF_HA_ADMIN_PASSWORD,
@@ -101,6 +103,7 @@ from .coordinator import (
     ProxmoxUpdateCoordinator,
     ProxmoxZFSCoordinator,
     forget_untracked_guest_agents,
+    shared_resources,
 )
 from .discovery import (
     discovered_resources,
@@ -133,7 +136,7 @@ from .storage import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Iterable
 
     from homeassistant.core import Event, HomeAssistant
     from homeassistant.helpers.typing import ConfigType
@@ -510,12 +513,18 @@ async def _get_api_or_retry_setup(
         return await hass.async_add_executor_job(get_api, proxmox, api_path)
     except AuthenticationError as error:
         raise ConfigEntryAuthFailed from error
+    except ResourceException as error:
+        # With an API token proxmoxer reports a revoked token as a plain 401.
+        if error.status_code == 401:
+            raise ConfigEntryAuthFailed from error
+        msg = f"Connection is unreachable to host {host}"
+        raise ConfigEntryNotReady(msg) from error
     except (
         SSLError,
         ConnectTimeout,
+        ReadTimeout,
         RetryError,
         connError,
-        ResourceException,
     ) as error:
         msg = f"Connection is unreachable to host {host}"
         raise ConfigEntryNotReady(msg) from error
@@ -677,7 +686,12 @@ async def _async_setup_node(  # noqa: PLR0917
         await coordinator_tasks.async_refresh()
         coordinators[f"{ProxmoxType.Tasks}_{node}"] = coordinator_tasks
 
-    if config_entry.options.get(CONF_DISKS_ENABLE, True):
+    # The disks and the pools are read here rather than through the
+    # coordinators' own path, so the skip for a node the cluster reports
+    # as offline has to be repeated: two reads that would each wait out
+    # pveproxy's answer while Home Assistant waits for the entry.
+    node_is_off = node in shared_resources(hass, config_entry).nodes_off
+    if config_entry.options.get(CONF_DISKS_ENABLE, True) and not node_is_off:
         try:
             disks = await hass.async_add_executor_job(
                 get_api, proxmox, f"nodes/{node}/disks/list"
@@ -851,7 +865,10 @@ async def _async_drop_coordinators(
 
 
 async def _learn_cluster_hosts(
-    hass: HomeAssistant, client: ProxmoxClient, proxmox: ProxmoxAPI
+    hass: HomeAssistant,
+    config_entry: ConfigEntry,
+    client: ProxmoxClient,
+    proxmox: ProxmoxAPI,
 ) -> str | None:
     """
     Tell the client what the other nodes of the cluster answer on.
@@ -875,11 +892,39 @@ async def _learn_cluster_hosts(
         for entry in (status if isinstance(status, list) else [])
         if isinstance(entry, dict) and entry.get("type") == "node"
     ]
-    client.learn_hosts([entry["ip"] for entry in nodes if entry.get("ip")])
+    # A successful membership read supersedes cached peers, including when a
+    # former cluster now consists of a single standalone node. An empty or
+    # malformed response is not evidence that the cached peers were removed.
+    if nodes:
+        client.learn_hosts(
+            [entry["ip"] for entry in nodes if entry.get("ip")], replace=True
+        )
     if len(client.hosts) > 1:
         LOGGER.debug("Fallback hosts for %s: %s", client.host, client.hosts[1:])
+    _remember_cluster_hosts(hass, config_entry, client)
     local = next((entry for entry in nodes if entry.get("local")), None)
     return str(local["name"]) if local and local.get("name") else None
+
+
+def _remember_cluster_hosts(
+    hass: HomeAssistant, config_entry: ConfigEntry, client: ProxmoxClient
+) -> None:
+    """
+    Keep the cluster's other addresses in the entry, for the next start.
+
+    They are read from `cluster/status`, which needs a host that answers -
+    so at the start of a setup, while the configured host is down, the only
+    addresses there are are the ones from the last time it was up. Written
+    only when they changed, and never emptied by a read that did not
+    happen: a single node, or credentials without Sys.Audit on `/`, returns
+    before this.
+    """
+    fallbacks = [host for host in client.hosts if host != config_entry.data[CONF_HOST]]
+    if list(config_entry.data.get(CONF_CLUSTER_HOSTS, [])) == fallbacks:
+        return
+    hass.config_entries.async_update_entry(
+        config_entry, data={**config_entry.data, CONF_CLUSTER_HOSTS: fallbacks}
+    )
 
 
 def async_merge_shared_storages(
@@ -971,6 +1016,7 @@ async def async_setup_entry(hass: HomeAssistant, config_entry: ConfigEntry) -> b
         realm=realm,
         password=password,
         verify_ssl=verify_ssl,
+        fallback_hosts=entry_data.get(CONF_CLUSTER_HOSTS, []),
     )
     try:
         await hass.async_add_executor_job(proxmox_client.build_client)
@@ -1000,7 +1046,7 @@ async def async_setup_entry(hass: HomeAssistant, config_entry: ConfigEntry) -> b
         raise ConfigEntryNotReady from error
 
     proxmox = await hass.async_add_executor_job(proxmox_client.get_api_client)
-    local_node = await _learn_cluster_hosts(hass, proxmox_client, proxmox)
+    local_node = await _learn_cluster_hosts(hass, config_entry, proxmox_client, proxmox)
 
     coordinators: dict[
         str,
@@ -1016,6 +1062,10 @@ async def async_setup_entry(hass: HomeAssistant, config_entry: ConfigEntry) -> b
     nodes_add_device = []
 
     resources = await _get_api_or_retry_setup(hass, proxmox, "cluster/resources", host)
+    # What the cluster says about its nodes, before the first coordinator
+    # asks anything: a node that is off is then skipped from the very
+    # first refresh instead of once the polling bursts have begun.
+    shared_resources(hass, config_entry).note_nodes(resources)
     async_merge_shared_storages(hass, config_entry, resources, local_node)
 
     # What these credentials may do, so the button platform can leave out
@@ -1091,13 +1141,16 @@ async def async_setup_entry(hass: HomeAssistant, config_entry: ConfigEntry) -> b
     ha_admin_password = config_entry.data.get(CONF_HA_ADMIN_PASSWORD)
     if ha_admin_user and ha_admin_password:
         candidate_client = ProxmoxClient(
-            host=host,
+            # The node the primary client ended up on, and the same places
+            # to go from there - the configured host may be the one down.
+            host=proxmox_client.host,
             port=port,
             user=ha_admin_user,
             token_name=config_entry.data.get(CONF_HA_ADMIN_TOKEN_NAME, ""),
             realm=config_entry.data.get(CONF_HA_ADMIN_REALM, DEFAULT_REALM),
             password=ha_admin_password,
             verify_ssl=verify_ssl,
+            fallback_hosts=proxmox_client.hosts,
         )
         try:
             await hass.async_add_executor_job(candidate_client.build_client)
@@ -1192,7 +1245,7 @@ async def async_setup_entry(hass: HomeAssistant, config_entry: ConfigEntry) -> b
 
         async def _async_add_resource(
             api_category: ProxmoxType, resource_id: str
-        ) -> None:
+        ) -> bool:
             """Build the coordinators, device and entities of a new resource."""
             try:
                 if api_category is ProxmoxType.Node:
@@ -1217,7 +1270,7 @@ async def async_setup_entry(hass: HomeAssistant, config_entry: ConfigEntry) -> b
                     resource_id,
                     error,
                 )
-                return
+                return False
 
             if api_category is ProxmoxType.Node:
                 coordinator_node = await _async_setup_node(
@@ -1230,7 +1283,7 @@ async def async_setup_entry(hass: HomeAssistant, config_entry: ConfigEntry) -> b
                     permissions,
                 )
                 if coordinator_node is None:
-                    return
+                    return False
                 if coordinator_node.data is not None:
                     device_info(
                         hass=hass,
@@ -1243,7 +1296,7 @@ async def async_setup_entry(hass: HomeAssistant, config_entry: ConfigEntry) -> b
                 if not await _async_setup_storage(
                     hass, config_entry, proxmox, resource_id, coordinators, listing
                 ):
-                    return
+                    return False
             elif not await _async_setup_guest(
                 hass,
                 config_entry,
@@ -1253,10 +1306,11 @@ async def async_setup_entry(hass: HomeAssistant, config_entry: ConfigEntry) -> b
                 coordinators,
                 listing,
             ):
-                return
+                return False
 
             for add_entities in config_entry.runtime_data[RESOURCE_CALLBACKS]:
                 await add_entities(api_category, resource_id)
+            return True
 
         async def _async_remove_resource(
             api_category: ProxmoxType, resource_id: str
@@ -1345,6 +1399,51 @@ async def async_remove_config_entry_device(
     return True
 
 
+def usable_mac_connections(
+    hass: HomeAssistant,
+    config_entry: ConfigEntry,
+    macs: Iterable[str],
+    identifier: str,
+) -> set[tuple[str, str]]:
+    """
+    Return the addresses this device may claim as its own.
+
+    Home Assistant gives a connection to one device per config entry, and
+    two nodes can report the same address: the listing names a port after
+    its permanent address, and a board that keeps that address in shared
+    flash hands out the same one twice. The node then overrides it in its
+    own configuration, while the listing still shows the original.
+
+    Claiming an address a sibling already has is refused, and the refusal
+    used to fail the whole entry at setup - reported upstream in #700 by
+    someone whose two nodes share an onboard Intel controller. The node
+    keeps everything else and simply goes without that connection.
+    """
+    dev_reg = dr.async_get(hass)
+    ours = (DOMAIN, identifier)
+    free: set[tuple[str, str]] = set()
+    for mac in macs:
+        connection = (dr.CONNECTION_NETWORK_MAC, mac)
+        # Scoped to this entry: a connection is unique within one, and
+        # another integration holding the same address is none of our
+        # business.
+        holder = dev_reg.async_get_device_by_connection(
+            connection, config_entry.entry_id
+        )
+        if holder is not None and ours not in holder.identifiers:
+            LOGGER.warning(
+                "The address %s is reported by more than one node and already "
+                "belongs to %s; leaving it off %s. Proxmox names a port after "
+                "its permanent address, which two boards can share",
+                mac,
+                holder.name or holder.id,
+                identifier,
+            )
+            continue
+        free.add(connection)
+    return free
+
+
 def device_info(
     hass: HomeAssistant,
     config_entry: ConfigEntry,
@@ -1410,16 +1509,21 @@ def device_info(
 
     elif api_category in (ProxmoxType.Node, ProxmoxType.Update):
         coordinator = coordinators[f"{ProxmoxType.Node}_{node}"]
+        name = f"{ProxmoxType.Node.capitalize()} {node}"
+        identifier = f"{config_entry.entry_id}_{ProxmoxType.Node.upper()}_{node}"
+        # A node whose first read failed has no data, and the processor is
+        # then simply unknown. Leaving the name unbound instead raised
+        # UnboundLocalError out of here and took the whole platform setup
+        # with it, so a node the cluster does not list - a renamed node, a
+        # token that may not see it - cost every other entity of the entry
+        # as well. Reported upstream in #712.
+        model_processor = None
         if (coordinator_data := coordinator.data) is not None:
             model_processor = coordinator_data.model
             proxmox_version = f"Proxmox {coordinator_data.version}"
-            connections = {
-                (dr.CONNECTION_NETWORK_MAC, mac)
-                for mac in coordinator_data.mac_addresses
-            }
-
-        name = f"{ProxmoxType.Node.capitalize()} {node}"
-        identifier = f"{config_entry.entry_id}_{ProxmoxType.Node.upper()}_{node}"
+            connections = usable_mac_connections(
+                hass, config_entry, coordinator_data.mac_addresses, identifier
+            )
         url = f"https://{host}:{port}/#v1:0:=node/{node}"
         via_device = None
         model = model_processor
@@ -1471,7 +1575,7 @@ def device_info(
     # exist made Home Assistant log a report while dropping the link anyway.
     # That happens for a guest, storage, disk or pool on a node the user did not
     # select, so no node device was created for it. Leaving the link out loses
-    # nothing, and update_device_via() attaches a guest to its node as soon as
+    # nothing, and update_guest_device() attaches a guest to its node as soon as
     # that node has a device.
     via_device_id: str | None = None
     if via_device is not None:
@@ -1482,20 +1586,45 @@ def device_info(
 
     if create:
         device_registry = dr.async_get(hass)
-        return device_registry.async_get_or_create(
-            config_entry_id=config_entry.entry_id,
-            entry_type=dr.DeviceEntryType.SERVICE,
-            configuration_url=url,
-            identifiers={(DOMAIN, identifier)},
-            connections=connections,
-            manufacturer=manufacturer or INTEGRATION_TITLE,
-            name=name,
-            model=model,
-            sw_version=proxmox_version,
-            hw_version=None,
-            via_device_id=via_device_id,
-            serial_number=serial_number or None,
-        )
+        try:
+            return device_registry.async_get_or_create(
+                config_entry_id=config_entry.entry_id,
+                entry_type=dr.DeviceEntryType.SERVICE,
+                configuration_url=url,
+                identifiers={(DOMAIN, identifier)},
+                connections=connections,
+                manufacturer=manufacturer or INTEGRATION_TITLE,
+                name=name,
+                model=model,
+                sw_version=proxmox_version,
+                hw_version=None,
+                via_device_id=via_device_id,
+                serial_number=serial_number or None,
+            )
+        except dr.DeviceInfoError:
+            # An address two devices of this entry both claim is refused,
+            # and the refusal would otherwise fail the setup of every
+            # resource after it. The device is worth more than the
+            # connection, so it is created without one.
+            LOGGER.warning(
+                "Device %s could not be created with the connections %s; "
+                "creating it without them",
+                identifier,
+                sorted(connections),
+            )
+            return device_registry.async_get_or_create(
+                config_entry_id=config_entry.entry_id,
+                entry_type=dr.DeviceEntryType.SERVICE,
+                configuration_url=url,
+                identifiers={(DOMAIN, identifier)},
+                manufacturer=manufacturer or INTEGRATION_TITLE,
+                name=name,
+                model=model,
+                sw_version=proxmox_version,
+                hw_version=None,
+                via_device_id=via_device_id,
+                serial_number=serial_number or None,
+            )
     return DeviceInfo(
         entry_type=dr.DeviceEntryType.SERVICE,
         configuration_url=url,
