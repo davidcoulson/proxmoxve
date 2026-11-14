@@ -11,10 +11,10 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 from proxmoxer import AuthenticationError
+from proxmoxer.core import ResourceException
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 from requests.exceptions import ConnectionError as RequestsConnectionError
 from requests.exceptions import ReadTimeout
-from proxmoxer.core import ResourceException
 
 from .fake_api import NODE, FakeProxmox
 

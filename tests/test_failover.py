@@ -477,4 +477,4 @@ def test_failed_probe_does_not_keep_its_client() -> None:
         assert client.failover(client.generation, verify_current=False) is False
 
     assert len(client._issued) == kept  # noqa: SLF001
-    bad._store["session"].close.assert_called()
+    bad._store["session"].close.assert_called()  # noqa: SLF001
