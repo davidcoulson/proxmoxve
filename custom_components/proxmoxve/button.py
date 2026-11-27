@@ -344,9 +344,6 @@ async def async_setup_buttons_nodes(
         else:
             continue
 
-        # unfound node case
-        if coordinator.data is None:
-            continue
         for description in PROXMOX_BUTTON_NODE:
             if description.key in BACKUP_COMMANDS and storage is None:
                 continue
@@ -398,9 +395,6 @@ async def async_setup_buttons_guests(
         else:
             continue
 
-        # unfound guest case
-        if coordinator.data is None:
-            continue
         for description in PROXMOX_BUTTON_VM:
             if (
                 description.api_category is not None

@@ -22,7 +22,7 @@ from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers import selector
 
-from ._vendor.aioproxmox.exceptions import ProxmoxAuthError
+from ._vendor.aioproxmox.exceptions import ProxmoxAPIError, ProxmoxAuthError
 from .api import (
     CONNECTION_ERRORS,
     SSL_ERRORS,
@@ -371,18 +371,20 @@ class ProxmoxOptionsFlowHandler(config_entries.OptionsFlow):
                 )
 
                 await self._proxmox_client.build_client()
+                proxmox = self._proxmox_client.get_api_client()
+                resources = await get_api(proxmox, "cluster/resources")
             except ProxmoxAuthError:
                 return self.async_abort(reason="auth_error")
             except SSL_ERRORS:
                 return self.async_abort(reason="ssl_rejection")
             except CONNECTION_ERRORS:
                 return self.async_abort(reason="cant_connect")
+            except ProxmoxAPIError as error:
+                return self.async_abort(
+                    reason="auth_error" if error.status == 401 else "no_resources"
+                )
             except Exception:  # pylint: disable=broad-except
                 return self.async_abort(reason="general_error")
-
-            proxmox = self._proxmox_client.get_api_client()
-
-            resources = await get_api(proxmox, "cluster/resources")
 
             resource_qemu = {}
             resource_lxc = {}
@@ -486,7 +488,7 @@ class ProxmoxOptionsFlowHandler(config_entries.OptionsFlow):
         if user_input is None:
             resources = await self._async_cluster_resources()
             if not isinstance(resources, list):
-                return resources
+                resources = []
             options = self.config_entry.options
             return self.async_show_form(
                 step_id="advanced",
@@ -587,16 +589,20 @@ class ProxmoxOptionsFlowHandler(config_entries.OptionsFlow):
                 ca_bundle=data.get(CONF_CA_BUNDLE, ""),
             )
             await self._proxmox_client.build_client()
+            proxmox = self._proxmox_client.get_api_client()
+            resources = await get_api(proxmox, "cluster/resources")
         except ProxmoxAuthError:
             return self.async_abort(reason="auth_error")
         except SSL_ERRORS:
             return self.async_abort(reason="ssl_rejection")
         except CONNECTION_ERRORS:
             return self.async_abort(reason="cant_connect")
+        except ProxmoxAPIError as error:
+            return self.async_abort(
+                reason="auth_error" if error.status == 401 else "no_resources"
+            )
         except Exception:  # pylint: disable=broad-except
             return self.async_abort(reason="general_error")
-        proxmox = self._proxmox_client.get_api_client()
-        resources = await get_api(proxmox, "cluster/resources")
         return resources if isinstance(resources, list) else []
 
     async def async_remove_device(
@@ -812,6 +818,7 @@ class ProxmoxVEConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
         try:
             await proxmox_client.build_client()
+            proxmox_nodes = await get_api(proxmox_client.get_api_client(), "nodes")
         except ProxmoxAuthError:
             errors[CONF_USERNAME] = "auth_error"
             ir.async_create_issue(
@@ -863,6 +870,10 @@ class ProxmoxVEConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     "port": str(import_config.get(CONF_PORT)),
                 },
             )
+        except ProxmoxAPIError as error:
+            return self.async_abort(
+                reason="auth_error" if error.status == 401 else "no_resources"
+            )
         except Exception:  # pylint: disable=broad-except
             errors[CONF_BASE] = "general_error"
             ir.async_create_issue(
@@ -885,11 +896,8 @@ class ProxmoxVEConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             return self.async_abort(reason="import_failed")
 
         proxmox_nodes_host = []
-        if proxmox := (proxmox_client.get_api_client()):
-            proxmox_nodes = await get_api(proxmox, "nodes")
-
-            for node in proxmox_nodes if proxmox_nodes is not None else []:
-                proxmox_nodes_host.append(node[CONF_NODE])
+        for node in proxmox_nodes if proxmox_nodes is not None else []:
+            proxmox_nodes_host.append(node[CONF_NODE])
 
         if (
             import_config is not None
@@ -901,12 +909,19 @@ class ProxmoxVEConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             # setup reads it the same way for both.
             config.setdefault(CONF_TOKEN_NAME, "")
             config[CONF_NODES] = []
+            config[CONF_QEMU] = []
+            config[CONF_LXC] = []
             for node_data in import_nodes:
                 node = node_data[CONF_NODE]
                 if node in proxmox_nodes_host:
                     config[CONF_NODES].append(node)
-                    config[CONF_QEMU] = node_data[CONF_VMS]
-                    config[CONF_LXC] = node_data[CONF_CONTAINERS]
+                    for key, source in (
+                        (CONF_QEMU, CONF_VMS),
+                        (CONF_LXC, CONF_CONTAINERS),
+                    ):
+                        for vmid in node_data[source]:
+                            if (guest_id := str(vmid)) not in config[key]:
+                                config[key].append(guest_id)
                 else:
                     ir.async_create_issue(
                         self.hass,
@@ -1153,6 +1168,12 @@ class ProxmoxVEConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     )
 
                     await self._proxmox_client.build_client()
+                    resources = await get_api(
+                        self._proxmox_client.get_api_client(), "cluster/resources"
+                    )
+                    if resources is None:
+                        return self.async_abort(reason="no_resources")
+                    self._expose_schema = self._build_expose_schema(resources)
 
                 except ProxmoxAuthError:
                     errors[CONF_USERNAME] = "auth_error"
@@ -1162,6 +1183,10 @@ class ProxmoxVEConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     errors[CONF_VERIFY_SSL] = "ssl_rejection"
                 except CONNECTION_ERRORS:
                     errors[CONF_HOST] = "cant_connect"
+                except ProxmoxAPIError as error:
+                    errors[CONF_BASE] = (
+                        "auth_error" if error.status == 401 else "no_resources"
+                    )
                 except Exception:  # pylint: disable=broad-except
                     errors[CONF_BASE] = "general_error"
 
@@ -1247,13 +1272,24 @@ class ProxmoxVEConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         is checked here rather than by the form.
         """
         if user_input is None:
-            if (proxmox_cliente := self._proxmox_client) is not None:
-                proxmox = proxmox_cliente.get_api_client()
-
-            resources = await get_api(proxmox, "cluster/resources")
-            if resources is None:
-                return self.async_abort(reason="no_resources")
-            self._expose_schema = self._build_expose_schema(resources)
+            if self._expose_schema is None:
+                try:
+                    resources = await get_api(
+                        self._proxmox_client.get_api_client(), "cluster/resources"
+                    )
+                except ProxmoxAuthError:
+                    return self.async_abort(reason="auth_error")
+                except SSL_ERRORS:
+                    return self.async_abort(reason="ssl_rejection")
+                except CONNECTION_ERRORS:
+                    return self.async_abort(reason="cant_connect")
+                except ProxmoxAPIError as error:
+                    return self.async_abort(
+                        reason="auth_error" if error.status == 401 else "no_resources"
+                    )
+                if resources is None:
+                    return self.async_abort(reason="no_resources")
+                self._expose_schema = self._build_expose_schema(resources)
             return self.async_show_form(
                 step_id="expose", data_schema=self._expose_schema
             )

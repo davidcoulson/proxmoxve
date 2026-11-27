@@ -37,12 +37,11 @@ from .const import (
     CONF_QEMU,
     CONF_STORAGE,
     COORDINATORS,
-    RESOURCE_CALLBACKS,
     ProxmoxKeyAPIParse,
     ProxmoxType,
 )
 from .discovery import selected
-from .entity import ProxmoxEntity, ProxmoxEntityDescription
+from .entity import ProxmoxEntity, ProxmoxEntityDescription, async_setup_entity_builders
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
@@ -1356,45 +1355,27 @@ async def async_setup_entry(
     async_add_entities: AddEntitiesCallback,
 ) -> None:
     """Set up sensor."""
-    async_add_entities(await async_setup_sensors_nodes(hass, config_entry))
-    async_add_entities(await async_setup_sensors_qemu(hass, config_entry))
-    async_add_entities(await async_setup_sensors_lxc(hass, config_entry))
-    async_add_entities(await async_setup_sensors_storages(hass, config_entry))
-    async_add_entities(await async_setup_sensors_tasks(hass, config_entry))
-    async_add_entities(await async_setup_hardware_sensors(hass, config_entry))
-    async_add_entities(await async_setup_sensors_cluster_summary(hass, config_entry))
-    async_add_entities(await async_setup_sensors_ha_status(hass, config_entry))
-    async_add_entities(await async_setup_sensors_certificates(hass, config_entry))
-    async_add_entities(await async_setup_sensors_backup_info(hass, config_entry))
-    async_add_entities(await async_setup_sensors_subscription(hass, config_entry))
-    async_add_entities(await async_setup_sensors_replication(hass, config_entry))
-    async_add_entities(await async_setup_sensors_backup(hass, config_entry))
-    async_add_entities(await async_setup_sensors_ceph(hass, config_entry))
-
-    async def _async_add_resource(api_category: ProxmoxType, resource_id: str) -> None:
-        """Build the sensors of a resource discovery found at runtime."""
-        only = [resource_id]
-        entities: list = []
-        if api_category is ProxmoxType.Node:
-            for builder in (
-                async_setup_sensors_nodes,
-                async_setup_sensors_tasks,
-                async_setup_hardware_sensors,
-                async_setup_sensors_certificates,
-                async_setup_sensors_subscription,
-                async_setup_sensors_replication,
-                async_setup_sensors_backup,
-            ):
-                entities.extend(await builder(hass, config_entry, only))
-        elif api_category is ProxmoxType.QEMU:
-            entities = await async_setup_sensors_qemu(hass, config_entry, only)
-        elif api_category is ProxmoxType.LXC:
-            entities = await async_setup_sensors_lxc(hass, config_entry, only)
-        elif api_category is ProxmoxType.Storage:
-            entities = await async_setup_sensors_storages(hass, config_entry, only)
-        async_add_entities(entities)
-
-    config_entry.runtime_data[RESOURCE_CALLBACKS].append(_async_add_resource)
+    await async_setup_entity_builders(
+        hass,
+        config_entry,
+        async_add_entities,
+        (
+            async_setup_sensors_nodes,
+            async_setup_sensors_qemu,
+            async_setup_sensors_lxc,
+            async_setup_sensors_storages,
+            async_setup_sensors_tasks,
+            async_setup_hardware_sensors,
+            async_setup_sensors_cluster_summary,
+            async_setup_sensors_ha_status,
+            async_setup_sensors_certificates,
+            async_setup_sensors_backup_info,
+            async_setup_sensors_subscription,
+            async_setup_sensors_replication,
+            async_setup_sensors_backup,
+            async_setup_sensors_ceph,
+        ),
+    )
 
 
 async def async_setup_sensors_cluster_summary(
@@ -1403,9 +1384,7 @@ async def async_setup_sensors_cluster_summary(
 ) -> list:
     """Set up the cluster summary sensors."""
     coordinators = config_entry.runtime_data[COORDINATORS]
-    if (
-        coordinator := coordinators.get(f"{ProxmoxType.Proxmox}_summary")
-    ) is None or coordinator.data is None:
+    if (coordinator := coordinators.get(f"{ProxmoxType.Proxmox}_summary")) is None:
         return []
 
     return [
@@ -1433,9 +1412,7 @@ async def async_setup_sensors_ha_status(
 
     # Only present when the optional cluster HA administration credentials
     # are configured and could be authenticated.
-    if (
-        coordinator := coordinators.get(f"{ProxmoxType.Proxmox}_ha_status")
-    ) is None or coordinator.data is None:
+    if (coordinator := coordinators.get(f"{ProxmoxType.Proxmox}_ha_status")) is None:
         return []
 
     return [
@@ -1497,9 +1474,7 @@ async def async_setup_sensors_ceph(
 
     # Only present on a cluster that actually runs Ceph, and only when the
     # optional cluster credentials are configured.
-    if (
-        coordinator := coordinators.get(f"{ProxmoxType.Proxmox}_ceph")
-    ) is None or coordinator.data is None:
+    if (coordinator := coordinators.get(f"{ProxmoxType.Proxmox}_ceph")) is None:
         return []
 
     return [
@@ -1602,7 +1577,7 @@ async def async_setup_sensors_subscription(
 
     for node in selected(config_entry, CONF_NODES, only):
         coordinator = coordinators.get(f"{ProxmoxType.Subscription}_{node}")
-        if coordinator is None or coordinator.data is None:
+        if coordinator is None:
             continue
 
         sensors.extend(
@@ -1636,7 +1611,7 @@ async def async_setup_sensors_certificates(
 
     for node in selected(config_entry, CONF_NODES, only):
         coordinator = coordinators.get(f"{ProxmoxType.Certificate}_{node}")
-        if coordinator is None or coordinator.data is None:
+        if coordinator is None:
             continue
 
         sensors.extend(
@@ -1678,166 +1653,140 @@ async def async_setup_sensors_nodes(
         else:
             continue
 
-        if coordinator.data is not None:
-            for description in PROXMOX_SENSOR_NODES:
+        for description in PROXMOX_SENSOR_NODES:
+            sensors.append(
+                create_sensor(
+                    coordinator=coordinator,
+                    info_device=device_info(
+                        hass=hass,
+                        config_entry=config_entry,
+                        api_category=ProxmoxType.Node,
+                        node=node,
+                    ),
+                    description=description,
+                    resource_id=node,
+                    config_entry=config_entry,
+                )
+            )
+
+        if f"{ProxmoxType.Update}_{node}" in coordinators:
+            coordinator_updates = coordinators[f"{ProxmoxType.Update}_{node}"]
+            for description in PROXMOX_SENSOR_UPDATE:
+                sensors.append(
+                    create_sensor(
+                        coordinator=coordinator_updates,
+                        info_device=device_info(
+                            hass=hass,
+                            config_entry=config_entry,
+                            api_category=ProxmoxType.Update,
+                            node=node,
+                        ),
+                        description=description,
+                        resource_id=node,
+                        config_entry=config_entry,
+                    )
+                )
+
+        coordinator_disks_data: ProxmoxDiskData
+        for coordinator_disk in coordinators.get(f"{ProxmoxType.Disk}_{node}", []):
+            if (coordinator_disks_data := coordinator_disk.data) is None:
+                continue
+
+            for description in PROXMOX_SENSOR_DISKS:
                 if (
-                    (data_value := getattr(coordinator.data, description.key, False))
-                    # and data_value != UNDEFINED
+                    (
+                        (
+                            data_value := getattr(
+                                coordinator_disk.data, description.key, False
+                            )
+                        )
+                        and data_value != UNDEFINED
+                    )
                     or data_value == 0
                     or (
                         (value := description.value_fn) is not None
-                        and value(coordinator.data) is not None
+                        and value(coordinator_disk.data) is not None
                     )
                 ):
+                    migrate_unique_id_disks.append(
+                        {
+                            "old_unique_id": f"{config_entry.entry_id}_{coordinator_disks_data.path}_{description.key}",
+                            "new_unique_id": f"{config_entry.entry_id}_{node}_{coordinator_disks_data.disk_id}_{description.key}",
+                        }
+                    )
+                    migrate_unique_id_disks.append(
+                        {
+                            "old_unique_id": f"{config_entry.entry_id}_{node}_{coordinator_disks_data.path}_{description.key}",
+                            "new_unique_id": f"{config_entry.entry_id}_{node}_{coordinator_disks_data.disk_id}_{description.key}",
+                        }
+                    )
+                    if (
+                        coordinator_disks_data.wwn
+                        and coordinator_disks_data.wwn != coordinator_disks_data.disk_id
+                    ):
+                        migrate_unique_id_disks.append(
+                            {
+                                "old_unique_id": f"{config_entry.entry_id}_{node}_{coordinator_disks_data.wwn}_{description.key}",
+                                "new_unique_id": f"{config_entry.entry_id}_{node}_{coordinator_disks_data.disk_id}_{description.key}",
+                            }
+                        )
+                    await async_migrate_old_unique_ids(
+                        hass, Platform.SENSOR, migrate_unique_id_disks
+                    )
                     sensors.append(
                         create_sensor(
-                            coordinator=coordinator,
+                            coordinator=coordinator_disk,
                             info_device=device_info(
                                 hass=hass,
                                 config_entry=config_entry,
-                                api_category=ProxmoxType.Node,
+                                api_category=ProxmoxType.Disk,
                                 node=node,
+                                resource_id=coordinator_disks_data.disk_id,
+                                cordinator_resource=coordinator_disks_data,
                             ),
                             description=description,
-                            resource_id=node,
+                            resource_id=f"{node}_{coordinator_disks_data.disk_id}",
                             config_entry=config_entry,
                         )
                     )
 
-            if f"{ProxmoxType.Update}_{node}" in coordinators:
-                coordinator_updates = coordinators[f"{ProxmoxType.Update}_{node}"]
-                for description in PROXMOX_SENSOR_UPDATE:
-                    if (
+        coordinator_zfs_data: ProxmoxZFSData
+        for coordinator_zfs in coordinators.get(f"{ProxmoxType.ZFS}_{node}", []):
+            if (coordinator_zfs_data := coordinator_zfs.data) is None:
+                continue
+
+            for description in PROXMOX_SENSOR_ZFS:
+                if (
+                    (
                         (
-                            (
-                                data_value := getattr(
-                                    coordinator_updates.data, description.key, False
-                                )
+                            data_value := getattr(
+                                coordinator_zfs.data, description.key, False
                             )
-                            and data_value != UNDEFINED
                         )
-                        or data_value == 0
-                        or (
-                            (value := description.value_fn) is not None
-                            and value(coordinator_updates.data) is not None
-                        )
-                    ):
-                        sensors.append(
-                            create_sensor(
-                                coordinator=coordinator_updates,
-                                info_device=device_info(
-                                    hass=hass,
-                                    config_entry=config_entry,
-                                    api_category=ProxmoxType.Update,
-                                    node=node,
-                                ),
-                                description=description,
-                                resource_id=node,
+                        and data_value != UNDEFINED
+                    )
+                    or data_value == 0
+                    or (
+                        (value := description.value_fn) is not None
+                        and value(coordinator_zfs.data) is not None
+                    )
+                ):
+                    sensors.append(
+                        create_sensor(
+                            coordinator=coordinator_zfs,
+                            info_device=device_info(
+                                hass=hass,
                                 config_entry=config_entry,
-                            )
+                                api_category=ProxmoxType.ZFS,
+                                node=node,
+                                resource_id=coordinator_zfs_data.name,
+                                cordinator_resource=coordinator_zfs_data,
+                            ),
+                            description=description,
+                            resource_id=f"{node}_{coordinator_zfs_data.name}",
+                            config_entry=config_entry,
                         )
-
-            coordinator_disks_data: ProxmoxDiskData
-            for coordinator_disk in coordinators.get(f"{ProxmoxType.Disk}_{node}", []):
-                if (coordinator_disks_data := coordinator_disk.data) is None:
-                    continue
-
-                for description in PROXMOX_SENSOR_DISKS:
-                    if (
-                        (
-                            (
-                                data_value := getattr(
-                                    coordinator_disk.data, description.key, False
-                                )
-                            )
-                            and data_value != UNDEFINED
-                        )
-                        or data_value == 0
-                        or (
-                            (value := description.value_fn) is not None
-                            and value(coordinator_disk.data) is not None
-                        )
-                    ):
-                        migrate_unique_id_disks.append(
-                            {
-                                "old_unique_id": f"{config_entry.entry_id}_{coordinator_disks_data.path}_{description.key}",
-                                "new_unique_id": f"{config_entry.entry_id}_{node}_{coordinator_disks_data.disk_id}_{description.key}",
-                            }
-                        )
-                        migrate_unique_id_disks.append(
-                            {
-                                "old_unique_id": f"{config_entry.entry_id}_{node}_{coordinator_disks_data.path}_{description.key}",
-                                "new_unique_id": f"{config_entry.entry_id}_{node}_{coordinator_disks_data.disk_id}_{description.key}",
-                            }
-                        )
-                        if (
-                            coordinator_disks_data.wwn
-                            and coordinator_disks_data.wwn
-                            != coordinator_disks_data.disk_id
-                        ):
-                            migrate_unique_id_disks.append(
-                                {
-                                    "old_unique_id": f"{config_entry.entry_id}_{node}_{coordinator_disks_data.wwn}_{description.key}",
-                                    "new_unique_id": f"{config_entry.entry_id}_{node}_{coordinator_disks_data.disk_id}_{description.key}",
-                                }
-                            )
-                        await async_migrate_old_unique_ids(
-                            hass, Platform.SENSOR, migrate_unique_id_disks
-                        )
-                        sensors.append(
-                            create_sensor(
-                                coordinator=coordinator_disk,
-                                info_device=device_info(
-                                    hass=hass,
-                                    config_entry=config_entry,
-                                    api_category=ProxmoxType.Disk,
-                                    node=node,
-                                    resource_id=coordinator_disks_data.disk_id,
-                                    cordinator_resource=coordinator_disks_data,
-                                ),
-                                description=description,
-                                resource_id=f"{node}_{coordinator_disks_data.disk_id}",
-                                config_entry=config_entry,
-                            )
-                        )
-
-            coordinator_zfs_data: ProxmoxZFSData
-            for coordinator_zfs in coordinators.get(f"{ProxmoxType.ZFS}_{node}", []):
-                if (coordinator_zfs_data := coordinator_zfs.data) is None:
-                    continue
-
-                for description in PROXMOX_SENSOR_ZFS:
-                    if (
-                        (
-                            (
-                                data_value := getattr(
-                                    coordinator_zfs.data, description.key, False
-                                )
-                            )
-                            and data_value != UNDEFINED
-                        )
-                        or data_value == 0
-                        or (
-                            (value := description.value_fn) is not None
-                            and value(coordinator_zfs.data) is not None
-                        )
-                    ):
-                        sensors.append(
-                            create_sensor(
-                                coordinator=coordinator_zfs,
-                                info_device=device_info(
-                                    hass=hass,
-                                    config_entry=config_entry,
-                                    api_category=ProxmoxType.ZFS,
-                                    node=node,
-                                    resource_id=coordinator_zfs_data.name,
-                                    cordinator_resource=coordinator_zfs_data,
-                                ),
-                                description=description,
-                                resource_id=f"{node}_{coordinator_zfs_data.name}",
-                                config_entry=config_entry,
-                            )
-                        )
+                    )
 
     return sensors
 
@@ -1858,21 +1807,14 @@ async def async_setup_sensors_qemu(
         else:
             continue
 
-        if coordinator.data is None:
-            continue
-
         for description in PROXMOX_SENSOR_QEMU:
-            if description.api_category in (None, ProxmoxType.QEMU) and (
-                (
-                    (data_value := getattr(coordinator.data, description.key, False))
-                    and data_value != UNDEFINED
-                )
-                or data_value == 0
-                or (
-                    (value := description.value_fn) is not None
-                    and value(coordinator.data) is not None
-                )
-            ):
+            if description.api_category in (None, ProxmoxType.QEMU):
+                if (
+                    description.key == "snapshots"
+                    and getattr(coordinator.data, description.key, UNDEFINED)
+                    is UNDEFINED
+                ):
+                    continue
                 sensors.append(
                     create_sensor(
                         coordinator=coordinator,
@@ -1907,21 +1849,14 @@ async def async_setup_sensors_lxc(
         else:
             continue
 
-        if coordinator.data is None:
-            continue
-
         for description in PROXMOX_SENSOR_LXC:
-            if description.api_category in (None, ProxmoxType.LXC) and (
-                (
-                    (data_value := getattr(coordinator.data, description.key, False))
-                    and data_value != UNDEFINED
-                )
-                or data_value == 0
-                or (
-                    (value := description.value_fn) is not None
-                    and value(coordinator.data) is not None
-                )
-            ):
+            if description.api_category in (None, ProxmoxType.LXC):
+                if (
+                    description.key == "snapshots"
+                    and getattr(coordinator.data, description.key, UNDEFINED)
+                    is UNDEFINED
+                ):
+                    continue
                 sensors.append(
                     create_sensor(
                         coordinator=coordinator,
@@ -1956,21 +1891,8 @@ async def async_setup_sensors_storages(
         else:
             continue
 
-        if coordinator.data is None:
-            continue
-
         for description in PROXMOX_SENSOR_STORAGE:
-            if description.api_category in (None, ProxmoxType.Storage) and (
-                (
-                    (data_value := getattr(coordinator.data, description.key, False))
-                    and data_value != UNDEFINED
-                )
-                or data_value == 0
-                or (
-                    (value := description.value_fn) is not None
-                    and value(coordinator.data) is not None
-                )
-            ):
+            if description.api_category in (None, ProxmoxType.Storage):
                 sensors.append(
                     create_sensor(
                         coordinator=coordinator,

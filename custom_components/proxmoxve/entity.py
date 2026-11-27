@@ -24,6 +24,7 @@ keep it, whatever the option says.
 
 from __future__ import annotations
 
+import asyncio
 import dataclasses
 from typing import TYPE_CHECKING, Any
 
@@ -37,13 +38,72 @@ from homeassistant.util import slugify
 from .const import (
     CONF_ENTITY_ID_PREFIX,
     CONF_ENTITY_ID_SCHEME,
+    COORDINATORS,
     DEFAULT_ENTITY_ID_PREFIX,
+    RESOURCE_CALLBACKS,
     SCHEME_EXTENDED,
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
+
+    from homeassistant.config_entries import ConfigEntry
     from homeassistant.core import HomeAssistant
-    from homeassistant.helpers.entity_platform import EntityPlatform
+    from homeassistant.helpers.entity_platform import (
+        AddEntitiesCallback,
+        EntityPlatform,
+    )
+
+
+async def async_setup_entity_builders(
+    hass: HomeAssistant,
+    config_entry: ConfigEntry,
+    async_add_entities: AddEntitiesCallback,
+    builders: tuple[Callable[..., Awaitable[list]], ...],
+) -> None:
+    """Add supported entities and discover new response keys after later polls."""
+    added: dict[str, DataUpdateCoordinator] = {}
+    watched: set[DataUpdateCoordinator] = set()
+    lock = asyncio.Lock()
+    pending = False
+
+    async def async_build() -> None:
+        nonlocal pending
+        async with lock:
+            while pending:
+                pending = False
+                for builder in builders:
+                    entities = []
+                    for entity in await builder(hass, config_entry):
+                        if added.get(entity.unique_id) is entity.coordinator:
+                            continue
+                        added[entity.unique_id] = entity.coordinator
+                        entities.append(entity)
+                    if entities:
+                        async_add_entities(entities)
+                for value in config_entry.runtime_data[COORDINATORS].values():
+                    for coordinator in value if isinstance(value, list) else [value]:
+                        if coordinator not in watched:
+                            watched.add(coordinator)
+                            config_entry.async_on_unload(
+                                coordinator.async_add_listener(schedule)
+                            )
+
+    def schedule() -> None:
+        nonlocal pending
+        if pending:
+            return
+        pending = True
+        config_entry.async_create_task(hass, async_build(), "Discover Proxmox entities")
+
+    async def async_add_resource(api_category: str, resource_id: str) -> None:
+        nonlocal pending
+        pending = True
+        await async_build()
+
+    pending = True
+    await async_build()
+    config_entry.runtime_data[RESOURCE_CALLBACKS].append(async_add_resource)
 
 
 @dataclasses.dataclass(frozen=True, kw_only=True)

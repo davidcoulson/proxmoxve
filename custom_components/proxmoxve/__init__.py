@@ -1104,6 +1104,9 @@ async def async_setup_entry(hass: HomeAssistant, config_entry: ConfigEntry) -> b
                 "sensors and the cluster HA status sensors will not be created"
             )
         else:
+            candidate_client.get_api_client().is_ha_admin = True
+            candidate_client.learn_hosts(proxmox_client.hosts)
+            candidate_client.get_api_client().share_hosts(proxmox)
             proxmox_ha_admin_client = candidate_client
 
     ha_resources_coordinator = None
@@ -1169,7 +1172,7 @@ async def async_setup_entry(hass: HomeAssistant, config_entry: ConfigEntry) -> b
 
         async def _async_add_resource(
             api_category: ProxmoxType, resource_id: str
-        ) -> None:
+        ) -> bool:
             """Build the coordinators, device and entities of a new resource."""
             try:
                 if api_category is ProxmoxType.Node:
@@ -1183,7 +1186,7 @@ async def async_setup_entry(hass: HomeAssistant, config_entry: ConfigEntry) -> b
                     resource_id,
                     error,
                 )
-                return
+                return False
 
             if api_category is ProxmoxType.Node:
                 coordinator_node = await _async_setup_node(
@@ -1196,7 +1199,7 @@ async def async_setup_entry(hass: HomeAssistant, config_entry: ConfigEntry) -> b
                     permissions,
                 )
                 if coordinator_node is None:
-                    return
+                    return False
                 if coordinator_node.data is not None:
                     device_info(
                         hass=hass,
@@ -1209,7 +1212,7 @@ async def async_setup_entry(hass: HomeAssistant, config_entry: ConfigEntry) -> b
                 if not await _async_setup_storage(
                     hass, config_entry, proxmox, resource_id, coordinators, listing
                 ):
-                    return
+                    return False
             elif not await _async_setup_guest(
                 hass,
                 config_entry,
@@ -1219,10 +1222,19 @@ async def async_setup_entry(hass: HomeAssistant, config_entry: ConfigEntry) -> b
                 coordinators,
                 listing,
             ):
-                return
+                return False
+
+            coordinator = coordinators.get(f"{api_category}_{resource_id}")
+            if (
+                coordinator is None
+                or coordinator.data is None
+                or not coordinator.last_update_success
+            ):
+                return False
 
             for add_entities in config_entry.runtime_data[RESOURCE_CALLBACKS]:
                 await add_entities(api_category, resource_id)
+            return True
 
         async def _async_remove_resource(
             api_category: ProxmoxType, resource_id: str
@@ -1347,6 +1359,7 @@ def device_info(
         model = "Cluster"
 
     elif api_category in (ProxmoxType.QEMU, ProxmoxType.LXC):
+        vm_name = str(resource_id)
         coordinator = coordinators[f"{api_category}_{resource_id}"]
         if (coordinator_data := coordinator.data) is not None:
             vm_name = coordinator_data.name
@@ -1366,7 +1379,11 @@ def device_info(
         if (coordinator_data := coordinator.data) is not None:
             node = coordinator_data.node
 
-        name = cordinator_resource.name
+        name = (
+            cordinator_resource.name
+            if cordinator_resource
+            else storage_name(resource_id)
+        )
         identifier = f"{config_entry.entry_id}_{api_category.upper()}_{resource_id.replace('storage/', '')}"
         if is_shared_storage_id(resource_id):
             # One device for the whole cluster; the web interface still
@@ -1383,6 +1400,7 @@ def device_info(
             model = api_category.capitalize()
 
     elif api_category in (ProxmoxType.Node, ProxmoxType.Update):
+        model_processor = None
         coordinator = coordinators[f"{ProxmoxType.Node}_{node}"]
         if (coordinator_data := coordinator.data) is not None:
             model_processor = coordinator_data.model

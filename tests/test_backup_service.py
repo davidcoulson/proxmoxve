@@ -2,6 +2,8 @@
 # SPDX-License-Identifier: MIT
 """Tests for starting a backup from Home Assistant, and seeing it run."""
 
+from types import SimpleNamespace
+
 import pytest
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
@@ -10,11 +12,19 @@ from homeassistant.helpers import entity_registry as er
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.proxmoxve import DOMAIN
-from custom_components.proxmoxve.const import CONF_BACKUP_STORAGE
+from custom_components.proxmoxve.const import (
+    CONF_BACKUP_STORAGE,
+    CONF_NODES,
+    COORDINATORS,
+    TRACKED,
+)
 from custom_components.proxmoxve.coordinator import parse_backup, parse_running_backup
 from custom_components.proxmoxve.services import (
     SERVICE_BACKUP,
     BackupPlan,
+    entry_hosting_guest,
+    entry_tracking_node,
+    resolve_device,
     vzdump_parameters,
 )
 
@@ -387,3 +397,32 @@ async def test_a_node_with_a_run_in_progress_is_skipped_on_request(
     )
     assert response["skipped"] == []
     assert len(_posts(fake_api)) == 1
+
+
+async def test_overlapping_clusters_use_the_target_device_entry(
+    hass: HomeAssistant,
+) -> None:
+    """Device ownership scopes overlapping guest ids and node names."""
+    entries = []
+    for node in ("node-a", "node-b"):
+        entry = MockConfigEntry(domain=DOMAIN)
+        entry.add_to_hass(hass)
+        entry.runtime_data = {
+            TRACKED: {CONF_NODES: ["shared"]},
+            COORDINATORS: {
+                "qemu_101": SimpleNamespace(data=SimpleNamespace(node=node))
+            },
+        }
+        entries.append(entry)
+    device = dr.async_get(hass).async_get_or_create(
+        config_entry_id=entries[1].entry_id,
+        identifiers={(DOMAIN, f"{entries[1].entry_id}_QEMU_101")},
+    )
+    assert resolve_device(hass, device.id) == [(entries[1], "node-b", 101)]
+    with pytest.raises(ServiceValidationError, match="ambiguous"):
+        entry_hosting_guest(hass, 101)
+    with pytest.raises(ServiceValidationError, match="ambiguous"):
+        entry_tracking_node(hass, "shared")
+    entries[1].runtime_data[COORDINATORS] = {}
+    with pytest.raises(ServiceValidationError):
+        resolve_device(hass, device.id)

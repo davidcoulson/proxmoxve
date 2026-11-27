@@ -7,7 +7,7 @@ What the configured credentials are allowed to do, read once at setup.
 token making the call, as a mapping of ACL path to the privileges granted
 there - `{"/vms/100": {"VM.PowerMgmt": 1, ...}, "/": {...}}`. Privileges
 propagate down the tree, so a grant on `/vms` or `/` covers `/vms/100`
-unless propagation was switched off for that ACL, which this does not see.
+unless propagation was switched off for that ACL (a returned value of zero).
 
 A button for an action the credentials cannot perform is a button that
 can only ever fail. Knowing the privileges beforehand lets setup leave
@@ -78,7 +78,12 @@ def is_granted(permissions: Permissions, path: str, privilege: str) -> bool:
     candidates = ["/" + "/".join(parts[:depth]) for depth in range(len(parts), 0, -1)]
     candidates.append("/")
     return any(
-        permissions.get(candidate, {}).get(privilege) == 1 for candidate in candidates
+        privilege in permissions.get(candidate, {})
+        and (
+            candidate == (path.rstrip("/") or "/")
+            or permissions[candidate][privilege] == 1
+        )
+        for candidate in candidates
     )
 
 
@@ -96,7 +101,7 @@ def is_granted_anywhere_below(
         return True
     prefix = path.rstrip("/") + "/"
     return any(
-        privileges.get(privilege) == 1
+        privilege in privileges
         for acl_path, privileges in permissions.items()
         if acl_path.startswith(prefix)
     )

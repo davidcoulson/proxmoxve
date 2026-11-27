@@ -26,6 +26,7 @@ from ._vendor.aioproxmox.exceptions import ProxmoxAPIError, ProxmoxAuthError
 from .api import CONNECTION_ERRORS, auth_error_status, get_api
 from .const import (
     CONF_GUEST_FILE_PATH,
+    CONF_HA_ADMIN_USERNAME,
     CONF_NODE,
     CONF_UPDATE_INTERVAL,
     DOMAIN,
@@ -44,6 +45,7 @@ from .discovery import (
     remember_resources,
     remove_resource_devices,
     resource_changes,
+    tracked_resources,
 )
 from .disk import disk_matches_id
 from .issues import FORBIDDEN, ResourceLine, note_resource
@@ -1052,7 +1054,7 @@ class ProxmoxDiscoveryCoordinator(DataUpdateCoordinator[dict[str, list[str]]]):
         hass: HomeAssistant,
         proxmox: ProxmoxVE,
         config_entry: ConfigEntry,
-        add_resource: Callable[[ProxmoxType, str], Awaitable[None]],
+        add_resource: Callable[[ProxmoxType, str], Awaitable[bool]],
         remove_resource: Callable[[ProxmoxType, str], Awaitable[None]],
     ) -> None:
         """Initialize the Proxmox discovery coordinator."""
@@ -1087,19 +1089,32 @@ class ProxmoxDiscoveryCoordinator(DataUpdateCoordinator[dict[str, list[str]]]):
         if not any(added.values()) and not any(removed.values()):
             return found
 
-        remember_resources(self.config_entry, found)
+        installed = tracked_resources(self.config_entry)
 
         # Gone first, so a guest deleted and recreated under the same id in
         # one interval ends up with fresh coordinators rather than stale ones.
         for api_category, key in RESOURCE_KEYS.items():
             for resource_id in removed[key]:
                 await self._remove_resource(api_category, resource_id)
+                installed[key].remove(resource_id)
+                remember_resources(self.config_entry, installed)
         remove_resource_devices(self.hass, self.config_entry, removed)
 
         # Nodes before guests and storages: their devices hang off the node's.
         for api_category, key in RESOURCE_KEYS.items():
             for resource_id in added[key]:
-                await self._add_resource(api_category, resource_id)
+                try:
+                    success = await self._add_resource(api_category, resource_id)
+                except Exception:
+                    LOGGER.exception(
+                        "Discovery: could not add %s %s", api_category, resource_id
+                    )
+                    success = False
+                if not success:
+                    await self._remove_resource(api_category, resource_id)
+                    continue
+                installed[key].append(resource_id)
+                remember_resources(self.config_entry, installed)
         return found
 
 
@@ -1145,6 +1160,9 @@ class ProxmoxHAResourcesCoordinator(DataUpdateCoordinator[set[str]]):
             ProxmoxType.Proxmox,
             self.resource_id,
         )
+        if resources is None:
+            msg = "HA resource membership is not available"
+            raise UpdateFailed(msg)
         return {
             resource["sid"]
             for resource in (resources or [])
@@ -2790,19 +2808,36 @@ class ProxmoxTaskCoordinator(ProxmoxCoordinator):
 
     async def _async_update_data(self) -> ProxmoxTaskData:
         """Update data for Proxmox Tasks."""
-        if self.node_name is not None:
-            api_path = f"nodes/{self.node_name}/tasks"
-            api_status = await poll_api(
+        current_time = int(time.time())
+        twenty_four_hours_ago = current_time - 86400
+        if self.node_name is None:
+            msg = f"{self.resource_id} node not found"
+            raise UpdateFailed(msg)
+
+        api_status = []
+        page_size = 500
+        start = 0
+        while True:
+            page = await poll_api(
                 self.hass,
                 self.config_entry,
                 self.proxmox,
-                api_path,
+                f"nodes/{self.node_name}/tasks",
                 ProxmoxType.Tasks,
                 self.resource_id,
+                params={
+                    "since": twenty_four_hours_ago,
+                    "limit": page_size,
+                    "start": start,
+                },
             )
-        else:
-            msg = f"{self.resource_id} node not found"
-            raise UpdateFailed(msg)
+            if page is None:
+                api_status = None
+                break
+            api_status.extend(page)
+            if len(page) < page_size:
+                break
+            start += len(page)
 
         if api_status is None:
             return ProxmoxTaskData(
@@ -2814,9 +2849,6 @@ class ProxmoxTaskCoordinator(ProxmoxCoordinator):
             )
 
         # Filter for failed tasks in the last 24 hours (86400 seconds)
-        current_time = int(time.time())
-        twenty_four_hours_ago = current_time - 86400
-
         failed_tasks = []
         for task in api_status:
             # Task is considered failed if:
@@ -2922,6 +2954,7 @@ async def poll_api(  # noqa: PLR0917
     resource_id: str | int | None = None,
     *,
     issue_crete_permissions: bool | None = True,
+    params: dict[str, Any] | None = None,
 ) -> Any:
     """
     Return data from the Proxmox API, or None for a read the credentials may not make.
@@ -2932,6 +2965,22 @@ async def poll_api(  # noqa: PLR0917
     credentials' fault and asks for new ones; a host that is not there
     fails the update; a 403 goes on the entry's repair and yields None.
     """
+
+    def auth_failed(error: Exception) -> None:
+        if getattr(proxmox, "is_ha_admin", False) is True:
+            ir.async_create_issue(
+                hass,
+                DOMAIN,
+                f"{config_entry.entry_id}_cluster_auth",
+                is_fixable=False,
+                is_persistent=False,
+                severity=ir.IssueSeverity.ERROR,
+                translation_key="cluster_auth",
+                translation_placeholders={"entry_id": config_entry.entry_id},
+            )
+            msg = "Optional cluster credentials were refused"
+            raise UpdateFailed(msg) from error
+        raise ConfigEntryAuthFailed from error
 
     def permission_to_resource(
         api_category: ProxmoxType,
@@ -2962,19 +3011,21 @@ async def poll_api(  # noqa: PLR0917
                 return "Unmapped"
 
     try:
-        api_data = await get_api(proxmox, api_path)
+        api_data = await get_api(
+            proxmox, api_path, **({"params": params} if params else {})
+        )
     except ProxmoxAuthError as error:
         # The fresh login with the stored password was refused as well -
         # unless the API only said it is not issuing tickets yet.
         if auth_error_status(error) not in (None, 401):
             raise UpdateFailed(error) from error
-        raise ConfigEntryAuthFailed from error
+        auth_failed(error)
     except CONNECTION_ERRORS as error:
         raise UpdateFailed(error) from error
     except ProxmoxAPIError as error:
         if error.status == 401:
             # A token has no login to repeat; this refusal is final.
-            raise ConfigEntryAuthFailed from error
+            auth_failed(error)
         if error.status == 403 and issue_crete_permissions:
             # The update coordinator passes "Update <node>" as its resource
             # id; the cluster-wide reads pass none at all. Neither may end
@@ -3005,6 +3056,8 @@ async def poll_api(  # noqa: PLR0917
             )
             return None
         raise UpdateFailed from error
+    if getattr(proxmox, "is_ha_admin", False) is True:
+        ir.async_delete_issue(hass, DOMAIN, f"{config_entry.entry_id}_cluster_auth")
     note_resource(
         hass, config_entry, FORBIDDEN, f"{api_category}_{resource_id}", listed=False
     )

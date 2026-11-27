@@ -1,12 +1,14 @@
 """Proxmox Home Assistant Integration Service."""
 
 import asyncio
+from copy import copy
 import logging
 import ssl
 import time
 from typing import Any
 
 import aiohttp
+from yarl import URL
 
 from .const import DEFAULT_PVE_PORT
 from .endpoints import AccessEndpoint, ClusterEndpoint, NodeEndpoint
@@ -20,6 +22,19 @@ SERVICES: dict[str, dict[str, Any]] = {
     "PVE": {"default_port": DEFAULT_PVE_PORT, "token_separator": "="}
     # Future PDM, PBS
 }
+
+
+def _parse_host(host: str) -> tuple[str, int | None]:
+    """Parse a DNS name or IP literal, with an optional explicit port."""
+    if host.count(":") > 1 and not host.startswith("["):
+        host = f"[{host}]"
+    url = URL(f"https://{host}")
+    if (
+        not url.host or url.user is not None or url.path != "/"
+        or url.query_string or url.fragment
+    ):
+        raise ValueError("Expected a host or IP address with an optional port")
+    return url.host, url.explicit_port
 
 
 class ProxmoxHTTPAuthBase:
@@ -231,18 +246,15 @@ class ProxmoxVE:
         Proxmox that presents a certificate from a private CA: load that CA
         into the context and every request verifies against it.
         """
-        if ":" in host and not host.startswith("["):
-            # Clean up base IPv4 parsing strings; ignore legacy bracket rules
-            host, _ = host.split(":", 1)
-
-        if not port:
-            port = int(SERVICES[service]["default_port"])
+        host, host_port = _parse_host(host)
+        port = port or host_port or int(SERVICES[service]["default_port"])
 
         self.auth: ProxmoxHTTPAuthBase
-        self.base_url = f"https://{host}:{port}/api2/json"
+        self.base_url = str(URL.build(scheme="https", host=host, port=port, path="/api2/json"))
         # The configured host first, then whatever the cluster says its other
         # nodes answer on. Only the first is ever written anywhere.
         self._hosts: list[str] = [host]
+        self.is_ha_admin = False
         self._host_index = 0
         self._port = port
         self._switch_lock = asyncio.Lock()
@@ -286,8 +298,25 @@ class ProxmoxVE:
         a reconnect.
         """
         for host in hosts:
-            if isinstance(host, str) and host and host not in self._hosts:
-                self._hosts.append(host)
+            if not isinstance(host, str) or not host:
+                continue
+            try:
+                name, port = _parse_host(host)
+                endpoint = (
+                    str(URL.build(scheme="https", host=name, port=port).raw_authority)
+                    if port is not None and port != self._port else name
+                )
+            except ValueError:
+                continue
+            if endpoint not in self._hosts:
+                self._hosts.append(endpoint)
+
+    def share_hosts(self, other: "ProxmoxVE") -> None:
+        """Share discovered endpoints while retaining separate authentication."""
+        other.learn_hosts(self.hosts)
+        current = self.host
+        self._hosts = other._hosts
+        self._host_index = self._hosts.index(current)
 
     async def learn_hosts_from_cluster(self) -> None:
         """Ask the cluster where else the API answers and remember it."""
@@ -318,10 +347,13 @@ class ProxmoxVE:
 
     def _use_host(self, index: int) -> None:
         self._host_index = index
-        self.base_url = f"https://{self._hosts[index]}:{self._port}/api2/json"
+        host, port = _parse_host(self._hosts[index])
+        self.base_url = str(URL.build(
+            scheme="https", host=host, port=port or self._port, path="/api2/json"
+        ))
         self.auth.base_url = self.base_url
 
-    async def failover(self) -> bool:
+    async def failover(self, failed_host: str) -> bool:
         """Move to the next node that answers, once the current one stopped.
 
         Several requests may hit the dead host at once; the lock lets the
@@ -330,22 +362,39 @@ class ProxmoxVE:
         is in place.
         """
         async with self._switch_lock:
+            if self.host != failed_host:
+                return True
             start = self._host_index
             for offset in range(1, len(self._hosts)):
                 index = (start + offset) % len(self._hosts)
-                self._use_host(index)
+                probe = copy(self)
+                probe.auth = copy(self.auth)
+                probe._use_host(index)
                 try:
-                    await self._request_once("GET", "version")
+                    try:
+                        await probe._request_once("GET", "version")
+                    except ProxmoxAPIError as err:
+                        if err.status != 401 or not hasattr(probe.auth, "relogin"):
+                            raise
+                        await probe.auth.relogin()
+                        await probe._request_once("GET", "version")
                 except (ProxmoxError, aiohttp.ClientError, TimeoutError) as err:
-                    _LOGGER.debug("Fallback host %s did not answer: %s", self.host, err)
+                    # A reachable candidate refusing fresh credentials needs
+                    # credential repair, not another reachability probe.
+                    if isinstance(err, ProxmoxAuthError) or (
+                        isinstance(err, ProxmoxAPIError) and err.status == 401
+                    ):
+                        raise
+                    _LOGGER.debug("Fallback host %s did not answer: %s", probe.host, err)
                     continue
+                self.auth = probe.auth
+                self._use_host(index)
                 _LOGGER.warning(
                     "Proxmox at %s stopped answering; using %s until it is back",
                     self._hosts[start],
                     self.host,
                 )
                 return True
-            self._use_host(start)
             return False
 
     async def request(
@@ -364,12 +413,14 @@ class ProxmoxVE:
         comes first included, since that is where a dead host is met once
         the ticket is an hour old.
         """
+        failed_host = self.host
         try:
             await self.auth.check_and_refresh(method=method)
         except aiohttp.ClientConnectionError, TimeoutError:
-            if len(self._hosts) < 2 or not await self.failover():
+            if len(self._hosts) < 2 or not await self.failover(failed_host):
                 raise
             await self.auth.check_and_refresh(method=method)
+        failed_host = self.host
         try:
             return await self._request_once(method, path, json_data, params)
         except ProxmoxAPIError as err:
@@ -379,7 +430,8 @@ class ProxmoxVE:
             await self.auth.relogin()
             return await self._request_once(method, path, json_data, params)
         except aiohttp.ClientConnectionError, TimeoutError:
-            if len(self._hosts) < 2 or not await self.failover():
+            # A lost response does not prove that a command was not accepted.
+            if method != "GET" or len(self._hosts) < 2 or not await self.failover(failed_host):
                 raise
             return await self._request_once(method, path, json_data, params)
 

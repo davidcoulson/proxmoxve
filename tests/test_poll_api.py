@@ -15,7 +15,11 @@ from custom_components.proxmoxve import DOMAIN
 from custom_components.proxmoxve._vendor.aioproxmox.exceptions import ProxmoxAuthError
 from custom_components.proxmoxve.api import ProxmoxClient
 from custom_components.proxmoxve.const import ProxmoxType
-from custom_components.proxmoxve.coordinator import poll_api
+from custom_components.proxmoxve.coordinator import (
+    ProxmoxHAResourcesCoordinator,
+    ProxmoxTaskCoordinator,
+    poll_api,
+)
 
 from .const import USER_INPUT_OK
 from .fake_api import api_error, connection_refused
@@ -200,3 +204,90 @@ async def test_a_refused_token_asks_for_credentials(hass: HomeAssistant) -> None
             hass, entry, proxmox, "nodes/pve/status", ProxmoxType.Node, "pve"
         )
     assert proxmox.request.await_count == 1
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "cluster/ha/resources",
+        "cluster/ha/status/current",
+        "cluster/status",
+        "cluster/ceph/status",
+    ],
+)
+async def test_forbidden_cluster_read_creates_permission_repair(
+    hass: HomeAssistant, path: str
+) -> None:
+    """The optional credential label can be built for any cluster read."""
+    entry = MockConfigEntry(
+        domain=DOMAIN, data={**USER_INPUT_OK, "ha_admin_username": "audit-user"}
+    )
+    entry.add_to_hass(hass)
+    assert (
+        await poll_api(hass, entry, _api(FORBIDDEN), path, ProxmoxType.Proxmox, path)
+        is None
+    )
+    issue = ir.async_get(hass).async_get_issue(DOMAIN, f"{entry.entry_id}_forbidden")
+    assert issue is not None
+    assert "audit-user" in issue.translation_placeholders["items"]
+
+
+async def test_forbidden_ha_membership_does_not_become_an_empty_set(
+    hass: HomeAssistant,
+) -> None:
+    """Unreadable HA membership fails the refresh rather than unmanaging guests."""
+    entry = MockConfigEntry(domain=DOMAIN, data=USER_INPUT_OK)
+    entry.add_to_hass(hass)
+    coordinator = ProxmoxHAResourcesCoordinator(
+        hass=hass, proxmox=_api(FORBIDDEN), config_entry=entry
+    )
+    await coordinator.async_refresh()
+    assert not coordinator.last_update_success
+    assert isinstance(coordinator.last_exception, UpdateFailed)
+
+
+@pytest.mark.parametrize(
+    "error", [api_error(401, "Unauthorized", "revoked"), ProxmoxAuthError("Code 401")]
+)
+async def test_admin_auth_failure_creates_repair_without_primary_reauth(
+    hass: HomeAssistant, current_entry: MockConfigEntry, error: Exception
+) -> None:
+    """Refused optional credentials must not start primary reauthentication."""
+    proxmox = _api(error, [])
+    proxmox.is_ha_admin = True
+    with pytest.raises(UpdateFailed, match="Optional cluster credentials"):
+        await poll_api(
+            hass, current_entry, proxmox, "cluster/ha/resources", ProxmoxType.Proxmox
+        )
+    assert not hass.config_entries.flow.async_progress()
+    issue_id = f"{current_entry.entry_id}_cluster_auth"
+    assert ir.async_get(hass).async_get_issue(DOMAIN, issue_id)
+    await poll_api(
+        hass, current_entry, proxmox, "cluster/ha/resources", ProxmoxType.Proxmox
+    )
+    assert ir.async_get(hass).async_get_issue(DOMAIN, issue_id) is None
+
+
+async def test_tasks_paginate_the_entire_day(
+    hass: HomeAssistant, current_entry: MockConfigEntry
+) -> None:
+    """Count failures beyond the first page while bounding the attribute list."""
+    now = 1800000000
+    tasks = [{"status": "OK", "starttime": now - 100, "endtime": now - 50}] * 500
+    failures = [{"status": "ERROR", "starttime": now - 200, "endtime": now - 150}] * 12
+    proxmox = _api(tasks, failures)
+    coordinator = ProxmoxTaskCoordinator(
+        hass=hass,
+        proxmox=proxmox,
+        config_entry=current_entry,
+        api_category="tasks",
+        node_name="pve",
+    )
+    with patch("custom_components.proxmoxve.coordinator.time.time", return_value=now):
+        await coordinator.async_refresh()
+    assert coordinator.data.failed_count == 12
+    assert len(coordinator.data.recent_failures) == 10
+    assert [call.kwargs["params"] for call in proxmox.request.await_args_list] == [
+        {"since": now - 86400, "limit": 500, "start": 0},
+        {"since": now - 86400, "limit": 500, "start": 500},
+    ]

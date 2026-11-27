@@ -21,12 +21,11 @@ from .const import (
     CONF_NODES,
     CONF_QEMU,
     CONF_STORAGE,
-    RESOURCE_CALLBACKS,
     ProxmoxKeyAPIParse,
     ProxmoxType,
 )
 from .discovery import selected
-from .entity import ProxmoxEntity, ProxmoxEntityDescription
+from .entity import ProxmoxEntity, ProxmoxEntityDescription, async_setup_entity_builders
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -242,36 +241,20 @@ async def async_setup_entry(
     async_add_entities: AddEntitiesCallback,
 ) -> None:
     """Set up binary sensors."""
-    async_add_entities(await async_setup_binary_sensors_nodes(hass, config_entry))
-    async_add_entities(await async_setup_binary_sensors_qemu(hass, config_entry))
-    async_add_entities(await async_setup_binary_sensors_lxc(hass, config_entry))
-    async_add_entities(await async_setup_binary_sensors_storages(hass, config_entry))
-    async_add_entities(await async_setup_binary_sensors_ha_status(hass, config_entry))
-    async_add_entities(await async_setup_binary_sensors_replication(hass, config_entry))
-    async_add_entities(await async_setup_binary_sensors_backup(hass, config_entry))
-
-    async def _async_add_resource(api_category: ProxmoxType, resource_id: str) -> None:
-        """Build the binary sensors of a resource discovery found at runtime."""
-        only = [resource_id]
-        entities: list = []
-        if api_category is ProxmoxType.Node:
-            for builder in (
-                async_setup_binary_sensors_nodes,
-                async_setup_binary_sensors_replication,
-                async_setup_binary_sensors_backup,
-            ):
-                entities.extend(await builder(hass, config_entry, only))
-        elif api_category is ProxmoxType.QEMU:
-            entities = await async_setup_binary_sensors_qemu(hass, config_entry, only)
-        elif api_category is ProxmoxType.LXC:
-            entities = await async_setup_binary_sensors_lxc(hass, config_entry, only)
-        elif api_category is ProxmoxType.Storage:
-            entities = await async_setup_binary_sensors_storages(
-                hass, config_entry, only
-            )
-        async_add_entities(entities)
-
-    config_entry.runtime_data[RESOURCE_CALLBACKS].append(_async_add_resource)
+    await async_setup_entity_builders(
+        hass,
+        config_entry,
+        async_add_entities,
+        (
+            async_setup_binary_sensors_nodes,
+            async_setup_binary_sensors_qemu,
+            async_setup_binary_sensors_lxc,
+            async_setup_binary_sensors_storages,
+            async_setup_binary_sensors_ha_status,
+            async_setup_binary_sensors_replication,
+            async_setup_binary_sensors_backup,
+        ),
+    )
 
 
 async def async_setup_binary_sensors_storages(
@@ -285,7 +268,7 @@ async def async_setup_binary_sensors_storages(
 
     for storage_id in selected(config_entry, CONF_STORAGE, only):
         coordinator = coordinators.get(f"{ProxmoxType.Storage}_{storage_id}")
-        if coordinator is None or coordinator.data is None:
+        if coordinator is None:
             continue
 
         sensors.extend(
@@ -303,9 +286,6 @@ async def async_setup_binary_sensors_storages(
                 config_entry=config_entry,
             )
             for description in PROXMOX_BINARYSENSOR_STORAGE
-            # The flags come from the node's own storage list; when that
-            # could not be read there is nothing honest to report.
-            if getattr(coordinator.data, description.key, UNDEFINED) is not UNDEFINED
         )
 
     return sensors
@@ -320,9 +300,7 @@ async def async_setup_binary_sensors_ha_status(
 
     # Only present when the optional cluster HA administration credentials
     # are configured and could be authenticated.
-    if (
-        coordinator := coordinators.get(f"{ProxmoxType.Proxmox}_ha_status")
-    ) is None or coordinator.data is None:
+    if (coordinator := coordinators.get(f"{ProxmoxType.Proxmox}_ha_status")) is None:
         return []
 
     return [
@@ -433,18 +411,37 @@ async def async_setup_binary_sensors_nodes(
         else:
             continue
 
-        # unfound node case
-        if coordinator.data is not None:
-            for description in PROXMOX_BINARYSENSOR_NODES:
-                if getattr(coordinator.data, description.key, UNDEFINED) != UNDEFINED:
+        for description in PROXMOX_BINARYSENSOR_NODES:
+            sensors.append(
+                create_binary_sensor(
+                    coordinator=coordinator,
+                    config_entry=config_entry,
+                    info_device=device_info(
+                        hass=hass,
+                        config_entry=config_entry,
+                        api_category=ProxmoxType.Node,
+                        node=node,
+                    ),
+                    description=description,
+                    resource_id=node,
+                )
+            )
+
+        if f"{ProxmoxType.Update}_{node}" in coordinators:
+            coordinator_updates = coordinators[f"{ProxmoxType.Update}_{node}"]
+            for description in PROXMOX_BINARYSENSOR_UPDATES:
+                if (
+                    getattr(coordinator_updates.data, description.key, False)
+                    != UNDEFINED
+                ):
                     sensors.append(
                         create_binary_sensor(
-                            coordinator=coordinator,
+                            coordinator=coordinator_updates,
                             config_entry=config_entry,
                             info_device=device_info(
                                 hass=hass,
                                 config_entry=config_entry,
-                                api_category=ProxmoxType.Node,
+                                api_category=ProxmoxType.Update,
                                 node=node,
                             ),
                             description=description,
@@ -452,76 +449,54 @@ async def async_setup_binary_sensors_nodes(
                         )
                     )
 
-            if f"{ProxmoxType.Update}_{node}" in coordinators:
-                coordinator_updates = coordinators[f"{ProxmoxType.Update}_{node}"]
-                for description in PROXMOX_BINARYSENSOR_UPDATES:
+        for coordinator_disk in coordinators.get(f"{ProxmoxType.Disk}_{node}", []):
+            if (coordinator_data := coordinator_disk.data) is None:
+                continue
+
+            for description in PROXMOX_BINARYSENSOR_DISKS:
+                if getattr(coordinator_disk.data, description.key, False):
+                    migrate_unique_id_disks.append(
+                        {
+                            "old_unique_id": f"{config_entry.entry_id}_{coordinator_data.path}_{description.key}",
+                            "new_unique_id": f"{config_entry.entry_id}_{node}_{coordinator_data.disk_id}_{description.key}",
+                        }
+                    )
+                    migrate_unique_id_disks.append(
+                        {
+                            "old_unique_id": f"{config_entry.entry_id}_{node}_{coordinator_data.path}_{description.key}",
+                            "new_unique_id": f"{config_entry.entry_id}_{node}_{coordinator_data.disk_id}_{description.key}",
+                        }
+                    )
                     if (
-                        getattr(coordinator_updates.data, description.key, False)
-                        != UNDEFINED
+                        coordinator_data.wwn
+                        and coordinator_data.wwn != coordinator_data.disk_id
                     ):
-                        sensors.append(
-                            create_binary_sensor(
-                                coordinator=coordinator_updates,
-                                config_entry=config_entry,
-                                info_device=device_info(
-                                    hass=hass,
-                                    config_entry=config_entry,
-                                    api_category=ProxmoxType.Update,
-                                    node=node,
-                                ),
-                                description=description,
-                                resource_id=node,
-                            )
-                        )
-
-            for coordinator_disk in coordinators.get(f"{ProxmoxType.Disk}_{node}", []):
-                if (coordinator_data := coordinator_disk.data) is None:
-                    continue
-
-                for description in PROXMOX_BINARYSENSOR_DISKS:
-                    if getattr(coordinator_disk.data, description.key, False):
                         migrate_unique_id_disks.append(
                             {
-                                "old_unique_id": f"{config_entry.entry_id}_{coordinator_data.path}_{description.key}",
+                                "old_unique_id": f"{config_entry.entry_id}_{node}_{coordinator_data.wwn}_{description.key}",
                                 "new_unique_id": f"{config_entry.entry_id}_{node}_{coordinator_data.disk_id}_{description.key}",
                             }
                         )
-                        migrate_unique_id_disks.append(
-                            {
-                                "old_unique_id": f"{config_entry.entry_id}_{node}_{coordinator_data.path}_{description.key}",
-                                "new_unique_id": f"{config_entry.entry_id}_{node}_{coordinator_data.disk_id}_{description.key}",
-                            }
-                        )
-                        if (
-                            coordinator_data.wwn
-                            and coordinator_data.wwn != coordinator_data.disk_id
-                        ):
-                            migrate_unique_id_disks.append(
-                                {
-                                    "old_unique_id": f"{config_entry.entry_id}_{node}_{coordinator_data.wwn}_{description.key}",
-                                    "new_unique_id": f"{config_entry.entry_id}_{node}_{coordinator_data.disk_id}_{description.key}",
-                                }
-                            )
-                        await async_migrate_old_unique_ids(
-                            hass, Platform.BINARY_SENSOR, migrate_unique_id_disks
-                        )
+                    await async_migrate_old_unique_ids(
+                        hass, Platform.BINARY_SENSOR, migrate_unique_id_disks
+                    )
 
-                        sensors.append(
-                            create_binary_sensor(
-                                coordinator=coordinator_disk,
-                                info_device=device_info(
-                                    hass=hass,
-                                    config_entry=config_entry,
-                                    api_category=ProxmoxType.Disk,
-                                    node=node,
-                                    resource_id=coordinator_data.disk_id,
-                                    cordinator_resource=coordinator_data,
-                                ),
-                                description=description,
-                                resource_id=f"{node}_{coordinator_data.disk_id}",
+                    sensors.append(
+                        create_binary_sensor(
+                            coordinator=coordinator_disk,
+                            info_device=device_info(
+                                hass=hass,
                                 config_entry=config_entry,
-                            )
+                                api_category=ProxmoxType.Disk,
+                                node=node,
+                                resource_id=coordinator_data.disk_id,
+                                cordinator_resource=coordinator_data,
+                            ),
+                            description=description,
+                            resource_id=f"{node}_{coordinator_data.disk_id}",
+                            config_entry=config_entry,
                         )
+                    )
     return sensors
 
 
@@ -543,25 +518,28 @@ async def async_setup_binary_sensors_qemu(
             continue
 
         # unfound vm case
-        if coordinator.data is None:
-            continue
         for description in PROXMOX_BINARYSENSOR_VM:
             if description.api_category in (None, ProxmoxType.QEMU):
-                if getattr(coordinator.data, description.key, UNDEFINED) != UNDEFINED:
-                    sensors.append(
-                        create_binary_sensor(
-                            coordinator=coordinator,
+                if (
+                    description.key == "agent_running"
+                    and getattr(coordinator.data, description.key, UNDEFINED)
+                    is UNDEFINED
+                ):
+                    continue
+                sensors.append(
+                    create_binary_sensor(
+                        coordinator=coordinator,
+                        config_entry=config_entry,
+                        info_device=device_info(
+                            hass=hass,
                             config_entry=config_entry,
-                            info_device=device_info(
-                                hass=hass,
-                                config_entry=config_entry,
-                                api_category=ProxmoxType.QEMU,
-                                resource_id=vm_id,
-                            ),
-                            description=description,
+                            api_category=ProxmoxType.QEMU,
                             resource_id=vm_id,
-                        )
+                        ),
+                        description=description,
+                        resource_id=vm_id,
                     )
+                )
 
         if ha_resources_coordinator is not None:
             sensors.append(
@@ -600,25 +578,28 @@ async def async_setup_binary_sensors_lxc(
             continue
 
         # unfound container case
-        if coordinator.data is None:
-            continue
         for description in PROXMOX_BINARYSENSOR_VM:
             if description.api_category in (None, ProxmoxType.LXC):
-                if getattr(coordinator.data, description.key, UNDEFINED) != UNDEFINED:
-                    sensors.append(
-                        create_binary_sensor(
-                            coordinator=coordinator,
+                if (
+                    description.key == "agent_running"
+                    and getattr(coordinator.data, description.key, UNDEFINED)
+                    is UNDEFINED
+                ):
+                    continue
+                sensors.append(
+                    create_binary_sensor(
+                        coordinator=coordinator,
+                        config_entry=config_entry,
+                        info_device=device_info(
+                            hass=hass,
                             config_entry=config_entry,
-                            info_device=device_info(
-                                hass=hass,
-                                config_entry=config_entry,
-                                api_category=ProxmoxType.LXC,
-                                resource_id=container_id,
-                            ),
-                            description=description,
+                            api_category=ProxmoxType.LXC,
                             resource_id=container_id,
-                        )
+                        ),
+                        description=description,
+                        resource_id=container_id,
                     )
+                )
 
         if ha_resources_coordinator is not None:
             sensors.append(
@@ -673,13 +654,14 @@ class ProxmoxBinarySensorEntity(ProxmoxEntity, BinarySensorEntity):
         self._attr_device_info = info_device
 
     @property
-    def is_on(self) -> bool:
-        """Return the state of the binary sensor."""
+    def is_on(self) -> bool | None:
+        """Return the state of the binary sensor, or unknown for missing data."""
         if (data := self.coordinator.data) is None:
-            return False
+            return None
 
-        if not (data_value := getattr(data, self.entity_description.key)):
-            return False
+        data_value = getattr(data, self.entity_description.key, UNDEFINED)
+        if data_value is UNDEFINED or data_value is None:
+            return None
 
         if self.entity_description.inverted:
             return data_value not in self.entity_description.on_value
